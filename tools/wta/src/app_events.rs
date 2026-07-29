@@ -192,6 +192,10 @@ impl App {
                 self.session_to_tab
                     .insert(session_id.clone(), bind_tab.clone());
                 let tab = self.tab_mut(&bind_tab);
+                if tab.session_id.as_deref() != Some(session_id.as_str()) {
+                    tab.usage = None;
+                    tab.usage_staleness = crate::usage::UsageStaleness::default();
+                }
                 tab.session_id = Some(session_id);
                 let has_real_content = !tab.completed_turns.is_empty()
                     || tab
@@ -265,6 +269,27 @@ impl App {
                 }
                 self.publish_agent_status();
             }
+            AppEvent::UsageReported {
+                session_id,
+                snapshot,
+            } => {
+                let target_tab = self.tab_for_session(&session_id);
+                let tab = self.tab_mut(&target_tab);
+                tab.usage_staleness.mark_reported(&snapshot);
+                if let Some(current) = tab.usage.as_mut() {
+                    current.merge(snapshot);
+                } else {
+                    tab.usage = Some(snapshot);
+                }
+                self.project_tab_state(&target_tab);
+            }
+            AppEvent::UsageCleared { session_id } => {
+                let target_tab = self.tab_for_session(&session_id);
+                let tab = self.tab_mut(&target_tab);
+                tab.usage = None;
+                tab.usage_staleness = crate::usage::UsageStaleness::default();
+                self.project_tab_state(&target_tab);
+            }
             AppEvent::TabError { tab_id, message } => {
                 // Scoped error for a specific tab. Bypasses the global
                 // auth-fallback / ConnectionState::Failed flip in
@@ -332,15 +357,37 @@ impl App {
                     return;
                 }
 
+                let session_survives = matches!(
+                    &failure,
+                    crate::protocol::acp::failure::AgentFailure::Protocol { .. }
+                );
+
                 // The transport to master is gone — latch the degraded state
                 // so the slash-command popup greys out everything but
                 // /restart (the only command that can recover without the
                 // dead pipe). Cleared on the next Connected.
-                if matches!(
-                    failure,
+                let transport_lost = matches!(
+                    &failure,
                     crate::protocol::acp::failure::AgentFailure::TransportLost
-                ) {
+                );
+                let stale_usage_tab = if transport_lost {
                     self.transport_lost = true;
+                    let target_tab = session_id
+                        .as_deref()
+                        .map(|sid| self.tab_for_session(sid))
+                        .unwrap_or_else(|| self.active_tab_key().to_string());
+                    let tab = self.tab_mut(&target_tab);
+                    if let Some(snapshot) = tab.usage.as_ref() {
+                        tab.usage_staleness.mark_present_stale(snapshot);
+                        Some(target_tab)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(target_tab) = stale_usage_tab {
+                    self.project_tab_state(&target_tab);
                 }
 
                 let is_auth_error = failure.is_auth();
@@ -399,8 +446,10 @@ impl App {
                     let tab = self.current_tab_mut();
                     tab.messages.retain(|m| !matches!(m, ChatMessage::Error(_)));
                 } else {
-                    self.state = ConnectionState::Failed(message.clone());
-                    self.publish_agent_status();
+                    if !session_survives {
+                        self.state = ConnectionState::Failed(message.clone());
+                        self.publish_agent_status();
+                    }
                     let tab = match session_id.as_deref() {
                         Some(sid) => self.session_tab_mut(sid),
                         None => self.current_tab_mut(),
@@ -1267,6 +1316,8 @@ impl App {
                         let tab = self.tab_mut(tab_id);
                         tab.current_view = View::Chat;
                         tab.clear_chat_history();
+                        tab.usage = None;
+                        tab.usage_staleness = crate::usage::UsageStaleness::default();
                         tab.completed_turns.clear();
                         tab.selected_completed_turn_idx = None;
                         tab.session_id = None;

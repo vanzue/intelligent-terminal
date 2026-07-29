@@ -3724,7 +3724,7 @@ fn transport_lost_latch_arms_on_transport_loss() {
 /// A non-transport failure (a one-off protocol error) must NOT arm the
 /// latch — the session is still alive, so commands stay enabled.
 #[test]
-fn protocol_error_does_not_arm_degraded_latch() {
+fn protocol_error_ends_turn_without_failing_connection() {
     let mut app = test_app();
     app.state = ConnectionState::Connected;
 
@@ -3741,6 +3741,12 @@ fn protocol_error_does_not_arm_degraded_latch() {
         !app.transport_lost,
         "a non-transport protocol error must not degrade the pane"
     );
+    assert_eq!(app.state, ConnectionState::Connected);
+    assert!(matches!(
+        app.current_tab().messages.last(),
+        Some(ChatMessage::Error(message)) if message == "protocol error"
+    ));
+    assert_eq!(app.current_tab().turn, TurnState::Idle);
 }
 
 /// An auth failure routes to sign-in, not the dead-transport path, so it
@@ -4447,7 +4453,7 @@ fn submit_test_prompt(app: &mut App, text: &str) {
 async fn mock_agent_reply_streams_into_app_chat() {
     use crate::protocol::acp::client::mock_agent_tests::connect_mock_agent;
     use agent_client_protocol as acp;
-    
+
 
     let local = tokio::task::LocalSet::new();
     local
@@ -4515,7 +4521,7 @@ async fn mock_agent_reply_streams_into_app_chat() {
 async fn run_permission_scenario(expected_keys: &[KeyCode], want: &str) {
     use crate::protocol::acp::client::mock_agent_tests::connect_mock_agent_asking_permission;
     use agent_client_protocol as acp;
-    
+
 
     let (conn, mut event_rx, outcome) = connect_mock_agent_asking_permission();
     conn.initialize(acp::schema::v1::InitializeRequest::new(acp::schema::ProtocolVersion::LATEST))
@@ -4721,7 +4727,7 @@ fn permission_request_keeps_thinking_until_turn_ends() {
 async fn tool_call_surfaces_card_in_chat() {
     use crate::protocol::acp::client::mock_agent_tests::connect_mock_agent_proposing_tool;
     use agent_client_protocol as acp;
-    
+
 
     let local = tokio::task::LocalSet::new();
     local
@@ -4807,7 +4813,7 @@ async fn app_after_prompt(
     conn: &crate::protocol::acp::conn::ClientLink,
 ) {
     use agent_client_protocol as acp;
-    
+
     conn.initialize(acp::schema::v1::InitializeRequest::new(acp::schema::ProtocolVersion::LATEST))
         .await
         .expect("initialize failed");
@@ -7269,4 +7275,231 @@ fn enter_on_wsl_history_row_resumes_inside_distro() {
     );
     // WSL rows must not also pass the Windows `-d <cwd>` flag.
     assert!(!argv.contains(" -d /home"), "WSL row must not pass Windows -d cwd");
+}
+
+fn usage_snapshot() -> crate::usage::UsageSnapshot {
+    crate::usage::UsageSnapshot {
+        context: Some(crate::usage::UsageContext { used: 20, size: 100 }),
+        cost: None,
+    }
+}
+
+#[test]
+fn usage_reported_updates_only_the_session_owner_tab() {
+    let mut app = test_app();
+    app.tab_id = Some("ACTIVE-TAB".to_string());
+    app.tab_sessions
+        .insert("ACTIVE-TAB".to_string(), TabSession::default());
+    app.tab_sessions
+        .insert("OWNER-TAB".to_string(), TabSession::default());
+    app.session_to_tab
+        .insert("usage-session".to_string(), "OWNER-TAB".to_string());
+    let snapshot = usage_snapshot();
+
+    app.handle_event(AppEvent::UsageReported {
+        session_id: "usage-session".to_string(),
+        snapshot: snapshot.clone(),
+    });
+
+    assert_eq!(app.tab_sessions["OWNER-TAB"].usage, Some(snapshot));
+    assert!(app.tab_sessions["ACTIVE-TAB"].usage.is_none());
+}
+
+#[test]
+fn usage_reported_merges_independent_metrics_for_the_same_session() {
+    let mut app = test_app();
+    app.session_to_tab
+        .insert("usage-session".to_string(), DEFAULT_TAB_ID.to_string());
+    app.handle_event(AppEvent::UsageReported {
+        session_id: "usage-session".to_string(),
+        snapshot: usage_snapshot(),
+    });
+    app.handle_event(AppEvent::UsageReported {
+        session_id: "usage-session".to_string(),
+        snapshot: crate::usage::UsageSnapshot {
+            context: None,
+            cost: Some(crate::usage::UsageCost {
+                amount_decimal_text: "0.004".to_string(),
+                currency: "USD".to_string(),
+            }),
+        },
+    });
+
+    let snapshot = app.current_tab().usage.as_ref().expect("merged usage");
+    assert_eq!(snapshot.context, Some(crate::usage::UsageContext { used: 20, size: 100 }));
+    assert_eq!(snapshot.cost.as_ref().expect("cost").currency, "USD");
+}
+
+#[test]
+fn usage_cleared_removes_only_owner_snapshot_without_changing_chat() {
+    let mut app = test_app();
+    let snapshot = usage_snapshot();
+    app.state = ConnectionState::Connected;
+    app.tab_sessions.insert(
+        "OWNER-TAB".to_string(),
+        TabSession {
+            messages: vec![ChatMessage::System("keep this message".to_string())],
+            usage: Some(snapshot.clone()),
+            ..Default::default()
+        },
+    );
+    app.tab_sessions.insert(
+        "OTHER-TAB".to_string(),
+        TabSession {
+            usage: Some(snapshot.clone()),
+            ..Default::default()
+        },
+    );
+    app.session_to_tab
+        .insert("usage-session".to_string(), "OWNER-TAB".to_string());
+
+    app.handle_event(AppEvent::UsageCleared {
+        session_id: "usage-session".to_string(),
+    });
+
+    assert!(app.tab_sessions["OWNER-TAB"].usage.is_none());
+    assert_eq!(
+        app.tab_sessions["OWNER-TAB"].messages,
+        vec![ChatMessage::System("keep this message".to_string())]
+    );
+    assert_eq!(app.tab_sessions["OTHER-TAB"].usage, Some(snapshot));
+    assert_eq!(app.state, ConnectionState::Connected);
+}
+
+#[test]
+fn usage_lifecycle_clear_preserves_but_session_boundaries_clear() {
+    let mut app = test_app();
+    let snapshot = usage_snapshot();
+    app.current_tab_mut().usage = Some(snapshot.clone());
+    app.cmd_clear();
+    assert_eq!(app.current_tab().usage, Some(snapshot));
+
+    app.cmd_new(false);
+    assert!(app.current_tab().usage.is_none());
+
+    app.current_tab_mut().usage = Some(usage_snapshot());
+    app.cmd_restart();
+    assert!(app.current_tab().usage.is_none());
+
+    app.current_tab_mut().usage = Some(usage_snapshot());
+    app.reset_tab_session_for(DEFAULT_TAB_ID);
+    assert!(app.current_tab().usage.is_none());
+}
+
+#[test]
+fn usage_lifecycle_load_and_new_connection_clear_but_model_change_preserves() {
+    let (mut app, _load_session_rx) = make_app_with_load_session_channel();
+    app.owner_tab_id = Some("OWNER-TAB".to_string());
+    app.tab_sessions.insert(
+        "OWNER-TAB".to_string(),
+        TabSession {
+            usage: Some(usage_snapshot()),
+            ..Default::default()
+        },
+    );
+    app.handle_event(AppEvent::WtEvent {
+        method: "load_session".to_string(),
+        pane_id: String::new(),
+        tab_id: None,
+        params: json!({
+            "tab_id": "OWNER-TAB",
+            "session_id": "loaded-session",
+            "cwd": "",
+        }),
+    });
+    assert!(app.tab_sessions["OWNER-TAB"].usage.is_none());
+
+    app.tab_id = Some("OWNER-TAB".to_string());
+    let snapshot = usage_snapshot();
+    app.current_tab_mut().usage = Some(snapshot.clone());
+    app.apply_global_acp_model(Some("new-model".to_string()));
+    assert_eq!(app.current_tab().usage, Some(snapshot));
+
+    app.current_tab_mut().session_id = Some("old-session".to_string());
+    app.handle_event(AppEvent::AgentConnected {
+        name: "Agent".to_string(),
+        model: None,
+        version: None,
+        session_id: "new-session".to_string(),
+        available_models: Vec::new(),
+        current_model_id: None,
+        load_session_supported: false,
+        image_supported: false,
+    });
+    assert!(app.current_tab().usage.is_none());
+}
+
+#[test]
+fn usage_projection_contains_context_cost_and_explicit_null() {
+    let tab = TabSession {
+        usage: Some(crate::usage::UsageSnapshot {
+            context: Some(crate::usage::UsageContext {
+                used: 1_024,
+                size: 8_192,
+            }),
+            cost: Some(crate::usage::UsageCost {
+                amount_decimal_text: "0.004".to_string(),
+                currency: "USD".to_string(),
+            }),
+        }),
+        ..Default::default()
+    };
+    let event = super::app_status_projection::build_agent_state_changed_event("TAB-1", &tab);
+    let items = event["params"]["usage"]["items"]
+        .as_array()
+        .expect("usage items");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["metric_id"], "acp.context.window");
+    assert_eq!(items[1]["metric_id"], "acp.billing.cost");
+    assert!(items.iter().all(|item| item["stale"] == false));
+
+    let cleared = super::app_status_projection::build_agent_state_changed_event(
+        "TAB-1",
+        &TabSession::default(),
+    );
+    assert!(cleared["params"]["usage"].is_null());
+}
+
+#[test]
+fn transport_loss_marks_usage_stale_until_each_metric_is_reported_again() {
+    let mut app = test_app();
+    app.state = ConnectionState::Connected;
+    app.current_tab_mut().session_id = Some("usage-session".to_string());
+    app.session_to_tab
+        .insert("usage-session".to_string(), DEFAULT_TAB_ID.to_string());
+    app.current_tab_mut().usage = Some(crate::usage::UsageSnapshot {
+        context: Some(crate::usage::UsageContext { used: 20, size: 100 }),
+        cost: Some(crate::usage::UsageCost {
+            amount_decimal_text: "0.004".to_string(),
+            currency: "USD".to_string(),
+        }),
+    });
+
+    app.handle_event(AppEvent::AgentError {
+        session_id: Some("usage-session".to_string()),
+        failure: crate::protocol::acp::failure::AgentFailure::TransportLost,
+        message: t!("connection.lost").into_owned(),
+    });
+    assert_eq!(
+        app.current_tab().usage_staleness,
+        crate::usage::UsageStaleness {
+            context: true,
+            cost: true,
+        }
+    );
+
+    app.handle_event(AppEvent::UsageReported {
+        session_id: "usage-session".to_string(),
+        snapshot: crate::usage::UsageSnapshot {
+            context: Some(crate::usage::UsageContext { used: 25, size: 100 }),
+            cost: None,
+        },
+    });
+    assert_eq!(
+        app.current_tab().usage_staleness,
+        crate::usage::UsageStaleness {
+            context: false,
+            cost: true,
+        }
+    );
 }

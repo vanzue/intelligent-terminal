@@ -71,7 +71,7 @@ fn known_id_with_no_allowlist_is_reconstructed_not_taken_from_pipe() {
     // No host allowlist (manual run / older host) ⇒ any known id is
     // honored, and the command is REBUILT from the id.
     let (cmd, id) = resolve(None, Some("gemini"), None);
-    assert_eq!(cmd, "gemini --experimental-acp");
+    assert_eq!(cmd, "gemini --acp");
     assert_eq!(id.as_deref(), Some("gemini"));
 }
 
@@ -106,19 +106,19 @@ fn known_agent_selection_preserves_wsl_source() {
 fn model_is_folded_in_for_native_agents_and_ignored_for_adapters() {
     // Native agent (gemini) takes --model on the command line.
     let (cmd, _) = resolve(None, Some("gemini"), Some("gemini-2.5-pro"));
-    assert_eq!(cmd, "gemini --experimental-acp --model gemini-2.5-pro");
+    assert_eq!(cmd, "gemini --acp --model gemini-2.5-pro");
 
     // Adapter agent (claude via npx) ignores the model here — it's
     // applied later via setSessionModel — so the command is stable.
     let (cmd, id) = resolve(None, Some("claude"), Some("opus-4"));
-    assert_eq!(cmd, "npx -y @agentclientprotocol/claude-agent-acp");
+    assert_eq!(cmd, "npx -y @agentclientprotocol/claude-agent-acp@0.59.0");
     assert_eq!(id.as_deref(), Some("claude"));
 }
 
 #[test]
 fn id_is_case_insensitive() {
     let (cmd, id) = resolve(Some(&allow_set(&["gemini"])), Some("GeMiNi"), None);
-    assert_eq!(cmd, "gemini --experimental-acp");
+    assert_eq!(cmd, "gemini --acp");
     assert_eq!(id.as_deref(), Some("gemini"));
 }
 
@@ -262,7 +262,7 @@ fn gpo_allowlist_blocks_known_but_unlisted_ids() {
     let allowed = allow_set(&["gemini"]);
     // gemini is listed ⇒ honored.
     let (cmd, _) = resolve(Some(&allowed), Some("gemini"), None);
-    assert_eq!(cmd, "gemini --experimental-acp");
+    assert_eq!(cmd, "gemini --acp");
     // copilot is a *known* agent but NOT in the GPO-filtered set ⇒
     // refused, fall back to default. (Defends against a peer helper
     // selecting a policy-blocked agent.)
@@ -288,7 +288,7 @@ fn agent_cmd_from_the_pipe_is_never_executed() {
     );
     let wta = crate::session_registry::extract_wta_meta(&mut meta);
     let (cmd, _) = resolve(None, wta.agent_id.as_deref(), wta.model.as_deref());
-    assert_eq!(cmd, "gemini --experimental-acp");
+    assert_eq!(cmd, "gemini --acp");
     assert!(!cmd.contains("calc.exe"), "pipe command must never appear");
 }
 
@@ -308,6 +308,8 @@ fn pool_key_dedupes_same_selection_and_separates_distinct_agents() {
 fn make_state() -> Arc<MasterStateInner> {
     Arc::new(MasterStateInner {
         session_to_helper: Mutex::new(HashMap::new()),
+        pending_usage: Mutex::new(HashMap::new()),
+        usage_generation: watch::channel(0u64).0,
         registry: crate::session_registry::InMemoryRegistry::shared(),
         helper_ext_subscribers: Mutex::new(HashMap::new()),
         wt: None,
@@ -791,6 +793,13 @@ fn make_notif(sid: &SessionId) -> SessionNotification {
     )
 }
 
+fn make_usage_notif(sid: &SessionId, used: u64) -> SessionNotification {
+    SessionNotification::new(
+        sid.clone(),
+        SessionUpdate::UsageUpdate(acp::schema::v1::UsageUpdate::new(used, 100)),
+    )
+}
+
 async fn route(state: &Arc<MasterStateInner>, notif: SessionNotification) {
     let client = MasterClient {
         state: Arc::clone(state),
@@ -996,6 +1005,91 @@ async fn session_notification_drops_on_full_channel() {
         map.contains_key(&sid),
         "Full (not Closed) must NOT remove the routing entry"
     );
+}
+
+#[tokio::test]
+async fn session_notification_coalesces_context_without_dropping_pending_cost() {
+    let state = make_state();
+    let (tx, _rx) = mpsc::channel::<SessionNotification>(1);
+    let sid = SessionId::new("slow-usage-helper");
+    {
+        let mut map = state.session_to_helper.lock().await;
+        map.insert(
+            sid.clone(),
+            HelperRoute {
+                helper_id: HelperId(10),
+                notif_tx: tx.clone(),
+                forwarder: None,
+                consecutive_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+    }
+    tx.try_send(make_notif(&sid)).unwrap();
+
+    route(
+        &state,
+        SessionNotification::new(
+            sid.clone(),
+            SessionUpdate::UsageUpdate(
+                acp::schema::v1::UsageUpdate::new(10, 100)
+                    .cost(acp::schema::v1::Cost::new(0.004, "USD")),
+            ),
+        ),
+    )
+    .await;
+    route(&state, make_usage_notif(&sid, 25)).await;
+
+    assert_eq!(tx.capacity(), 0);
+    let pending = state.pending_usage.lock().await;
+    let (owner, notification) = pending.get(&sid).expect("latest usage retained");
+    assert_eq!(*owner, HelperId(10));
+    match &notification.update {
+        SessionUpdate::UsageUpdate(update) => {
+            assert_eq!(update.used, 25);
+            assert_eq!(
+                update.cost.as_ref(),
+                Some(&acp::schema::v1::Cost::new(0.004, "USD"))
+            );
+        }
+        other => panic!("expected usage update, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rebinding_session_clears_previous_helpers_pending_usage() {
+    let state = make_state();
+    let sid = SessionId::new("rebound-usage-session");
+    let (tx_a, _rx_a) = mpsc::channel::<SessionNotification>(1);
+    let (tx_b, _rx_b) = mpsc::channel::<SessionNotification>(1);
+
+    bind_session_route(
+        &state,
+        sid.clone(),
+        HelperRoute {
+            helper_id: HelperId(1),
+            notif_tx: tx_a,
+            forwarder: None,
+            consecutive_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        },
+    )
+    .await;
+    route(&state, make_usage_notif(&sid, 25)).await;
+    assert!(state.pending_usage.lock().await.contains_key(&sid));
+
+    bind_session_route(
+        &state,
+        sid.clone(),
+        HelperRoute {
+            helper_id: HelperId(2),
+            notif_tx: tx_b,
+            forwarder: None,
+            consecutive_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        },
+    )
+    .await;
+
+    assert!(!state.pending_usage.lock().await.contains_key(&sid));
+    assert_eq!(state.session_to_helper.lock().await[&sid].helper_id, HelperId(2));
 }
 
 /// Unknown SessionId is a no-op (warned but not errored) — the
@@ -1554,6 +1648,8 @@ fn make_state_with_wt(
 ) -> Arc<MasterStateInner> {
     Arc::new(MasterStateInner {
         session_to_helper: Mutex::new(HashMap::new()),
+        pending_usage: Mutex::new(HashMap::new()),
+        usage_generation: watch::channel(0u64).0,
         registry: crate::session_registry::InMemoryRegistry::shared(),
         helper_ext_subscribers: Mutex::new(HashMap::new()),
         wt: Some(wt),

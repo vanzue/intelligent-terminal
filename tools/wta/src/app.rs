@@ -1005,6 +1005,8 @@ impl Scroll {
 pub struct TabSession {
     /// Per-tab autofix state machine (see `TabAutofixState`).
     pub autofix: TabAutofixState,
+    pub usage: Option<crate::usage::UsageSnapshot>,
+    pub usage_staleness: crate::usage::UsageStaleness,
 
     // Conversation history
     pub messages: Vec<ChatMessage>,
@@ -4337,6 +4339,8 @@ impl App {
             AppEvent::ConnectionStage(_) => "connection_stage",
             AppEvent::AgentConnected { .. } => "agent_connected",
             AppEvent::SessionAttached { .. } => "session_attached",
+            AppEvent::UsageReported { .. } => "usage_reported",
+            AppEvent::UsageCleared { .. } => "usage_cleared",
             AppEvent::TabError { .. } => "tab_error",
             AppEvent::TabSystemMessage { .. } => "tab_system_message",
             AppEvent::AgentPasteTextReady { .. } => "agent_paste_text_ready",
@@ -5230,6 +5234,8 @@ impl App {
             });
         let tab = self.current_tab_mut();
         tab.clear_chat_history();
+        tab.usage = None;
+        tab.usage_staleness = crate::usage::UsageStaleness::default();
         tab.completed_turns.clear();
         tab.selected_completed_turn_idx = None;
         tab.session_id = None;
@@ -5409,6 +5415,8 @@ impl App {
         self.session_id.clear();
         for (_, tab) in self.tab_sessions.iter_mut() {
             tab.clear_chat_history();
+            tab.usage = None;
+            tab.usage_staleness = crate::usage::UsageStaleness::default();
             tab.completed_turns.clear();
             tab.selected_completed_turn_idx = None;
             tab.session_id = None;
@@ -5805,6 +5813,8 @@ impl App {
         // `clear_chat_history` deliberately leaves alone.
         if let Some(tab) = self.tab_sessions.get_mut(tab_id) {
             tab.clear_chat_history();
+            tab.usage = None;
+            tab.usage_staleness = crate::usage::UsageStaleness::default();
             tab.completed_turns.clear();
             tab.selected_completed_turn_idx = None;
             tab.scroll_to_bottom();

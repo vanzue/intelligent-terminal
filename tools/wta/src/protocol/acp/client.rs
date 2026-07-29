@@ -18,6 +18,7 @@ use crate::pane_context::PaneContext;
 use crate::shell::{ShellManager, TerminalConfig};
 
 const ACTIVE_PANE_CONTEXT_MAX_CHARS: usize = 4000;
+const ACP_SESSION_USAGE_SCHEMA: &str = "acp.v1.session_usage";
 // Normal helper startup can race a slow wta-master cold start: master opens its
 // pipe only after spawning and initializing the agent CLI (up to 60s for npx
 // adapters), so keep a long budget there.
@@ -133,6 +134,21 @@ pub struct PromptSubmission {
     /// the agent advertised `promptCapabilities.image`). Empty for the common
     /// text-only and all auto-fix prompts.
     pub images: Vec<crate::clipboard_image::PastedImage>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PromptUsageIdentity {
+    family_id: Option<String>,
+    reporter_id: Option<String>,
+}
+
+fn is_redundant_startup_model_error(
+    identity: &PromptUsageIdentity,
+    error: &acp::Error,
+) -> bool {
+    identity.family_id.as_deref() == Some(crate::agent_registry::GEMINI_AGENT_ID)
+        && identity.reporter_id.as_deref() == Some("gemini-cli")
+        && error.code == acp::ErrorCode::MethodNotFound
 }
 
 /// User-initiated cancel of an in-flight prompt. The App emits one of
@@ -1525,11 +1541,36 @@ fn session_update_kind(update: &acp::schema::v1::SessionUpdate) -> &'static str 
         acp::schema::v1::SessionUpdate::ToolCall(_) => "tool_call",
         acp::schema::v1::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
         acp::schema::v1::SessionUpdate::Plan(_) => "plan",
+        acp::schema::v1::SessionUpdate::UsageUpdate(_) => "usage_update",
         _ => "other",
     }
 }
 
 impl WtaClient {
+    async fn dispatch_session_notification(&self, args: acp::schema::v1::SessionNotification) {
+        let usage_session_id = matches!(
+            &args.update,
+            acp::schema::v1::SessionUpdate::UsageUpdate(_)
+        )
+        .then(|| args.session_id.0.to_string());
+
+        if self.session_notification(args).await.is_err() {
+            if let Some(session_id) = usage_session_id {
+                tracing::warn!(
+                    target: "usage",
+                    schema = ACP_SESSION_USAGE_SCHEMA,
+                    source = "acp_standard",
+                    outcome = "rejected",
+                    "usage update rejected"
+                );
+                let _ = self
+                    .state
+                    .event_tx
+                    .send(AppEvent::UsageCleared { session_id });
+            }
+        }
+    }
+
     async fn request_permission(
         &self,
         args: acp::schema::v1::RequestPermissionRequest,
@@ -1602,7 +1643,10 @@ impl WtaClient {
         tracing::trace!(target: "acp", "session_notification: kind={}", kind);
         // The full update carries agent message/thought text, tool-call
         // content, plan bodies, and replayed user-message chunks — trace only.
-        acp_trace_content(&format!("session_notification update: {:?}", args.update));
+        // Usage values remain redacted even at trace level.
+        if kind != "usage_update" {
+            acp_trace_content(&format!("session_notification update: {:?}", args.update));
+        }
         let sid = args.session_id.0.to_string();
         self.state
             .prompt_timing
@@ -1696,6 +1740,13 @@ impl WtaClient {
                 let _ = self.state.event_tx.send(AppEvent::Plan {
                     session_id: sid,
                     entries,
+                });
+            }
+            acp::schema::v1::SessionUpdate::UsageUpdate(update) => {
+                let snapshot = crate::usage::normalize_standard_usage(&update);
+                let _ = self.state.event_tx.send(AppEvent::UsageReported {
+                    session_id: sid,
+                    snapshot,
                 });
             }
             _ => {} // Ignore other update types for now
@@ -2115,6 +2166,10 @@ pub async fn run_acp_client_over_pipe(
     post_login_reconnect: bool,
 ) -> Result<()> {
     let startup_probe = StartupProbe::new();
+    let usage_family_id = agent_id.as_deref().and_then(|agent_id| {
+        let family_id = agent_id.trim().to_ascii_lowercase();
+        crate::agent_registry::is_known_id(&family_id).then_some(family_id)
+    });
     startup_probe.log(&format!(
         "run_acp_client_over_pipe task start pipe={} acp_model={:?} wt_connected={}",
         pipe_name, acp_model_override, wt_connected
@@ -2237,7 +2292,7 @@ pub async fn run_acp_client_over_pipe(
         .on_receive_notification({ let c = client.clone(); move |notif: acp::schema::v1::AgentNotification, _cx| { let c = c.clone(); async move {
             use acp::schema::v1::AgentNotification as N;
             match notif {
-                N::SessionNotification(n) => { let _ = c.session_notification(n).await; }
+                N::SessionNotification(n) => c.dispatch_session_notification(n).await,
                 N::ExtNotification(n) => { let _ = c.ext_notification(n).await; }
                 _ => {}
             }
@@ -2314,10 +2369,7 @@ pub async fn run_acp_client_over_pipe(
                 // "unknown selection" warn on every connect and then fall back
                 // to the default anyway. Sending `None` makes that fallback
                 // silent (master applies its own `--agent` default).
-                agent_id: agent_id.and_then(|s| {
-                    let id = s.trim().to_ascii_lowercase();
-                    crate::agent_registry::is_known_id(&id).then_some(id)
-                }),
+                agent_id: usage_family_id.clone(),
                 model: acp_model_override
                     .clone()
                     .filter(|s| !s.trim().is_empty()),
@@ -2355,6 +2407,10 @@ pub async fn run_acp_client_over_pipe(
             );
             anyhow::anyhow!("initialize over master pipe failed: {}", e)
         })?;
+    let prompt_usage_identity = PromptUsageIdentity {
+        family_id: usage_family_id,
+        reporter_id: init_resp.agent_info.as_ref().map(|info| info.name.clone()),
+    };
     // Connection milestone at info so a clean handshake is visible in release.
     tracing::info!(
         target: "helper",
@@ -2628,23 +2684,36 @@ pub async fn run_acp_client_over_pipe(
                 "Setting ACP session model to {} (over pipe)",
                 requested_model
             ));
-            crate::protocol::acp::model_select::apply_session_model(
+            let model_result = crate::protocol::acp::model_select::apply_session_model(
                 &conn,
                 session_id.clone(),
                 requested_model.clone(),
             )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to set requested model {}: {}",
-                    requested_model,
-                    e
-                )
-            })?;
-            startup_probe.log(&format!(
-                "ACP session model set to {} (over pipe)",
-                requested_model
-            ));
+            .await;
+            match model_result {
+                Ok(()) => startup_probe.log(&format!(
+                    "ACP session model set to {} (over pipe)",
+                    requested_model
+                )),
+                Err(error) if is_redundant_startup_model_error(&prompt_usage_identity, &error) => {
+                    tracing::warn!(
+                        target: "helper",
+                        model = %requested_model,
+                        "Gemini CLI does not implement session/set_model; using the model already supplied on its launch command"
+                    );
+                    startup_probe.log(&format!(
+                        "Gemini startup model {} already applied by launch command",
+                        requested_model
+                    ));
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to set requested model {}: {}",
+                        requested_model,
+                        error
+                    ));
+                }
+            }
         }
     }
 
@@ -3742,9 +3811,9 @@ async fn dispatch_prompt_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_result_failure_fields, complete_prompt_request, inject_wta_pane_meta, shell_from_active,
-        post_login_authenticate_error, timeout_result_failure_fields, user_locale_tag,
-        PromptTimingState, SoftStopReason,
+        acp_result_failure_fields, complete_prompt_request, inject_wta_pane_meta,
+        is_redundant_startup_model_error, post_login_authenticate_error, shell_from_active, timeout_result_failure_fields,
+        user_locale_tag, PromptTimingState, PromptUsageIdentity, SoftStopReason,
     };
     use super::acp;
     use crate::protocol::acp::failure::{AgentFailure, HandshakeStage};
@@ -3939,6 +4008,37 @@ mod tests {
             crate::agent_registry::extract_model_from_args(&args, profile),
             Some("claude-haiku-4.5")
         );
+    }
+
+    #[test]
+    fn gemini_method_not_found_is_a_redundant_startup_model_error() {
+        let identity = PromptUsageIdentity {
+            family_id: Some("gemini".to_string()),
+            reporter_id: Some("gemini-cli".to_string()),
+        };
+
+        assert!(is_redundant_startup_model_error(
+            &identity,
+            &acp::Error::method_not_found(),
+        ));
+        assert!(!is_redundant_startup_model_error(
+            &PromptUsageIdentity {
+                family_id: Some("copilot".to_string()),
+                reporter_id: Some("gemini-cli".to_string()),
+            },
+            &acp::Error::method_not_found(),
+        ));
+        assert!(!is_redundant_startup_model_error(
+            &PromptUsageIdentity {
+                family_id: Some("gemini".to_string()),
+                reporter_id: Some("lookalike-gemini".to_string()),
+            },
+            &acp::Error::method_not_found(),
+        ));
+        assert!(!is_redundant_startup_model_error(
+            &identity,
+            &acp::Error::internal_error(),
+        ));
     }
 
     #[tokio::test]

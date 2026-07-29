@@ -26,6 +26,13 @@ pub enum AppEvent {
         available_models: Vec<AcpModelInfo>,
         current_model_id: Option<String>,
     },
+    UsageReported {
+        session_id: String,
+        snapshot: crate::usage::UsageSnapshot,
+    },
+    UsageCleared {
+        session_id: String,
+    },
     TabError {
         tab_id: String,
         message: String,

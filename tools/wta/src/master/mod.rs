@@ -54,7 +54,7 @@ const MASTER_PIPE_DISCOVERY_FILE: &str = "master-pipe.txt";
 use agent_client_protocol as acp;
 use anyhow::{anyhow, Context, Result};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::LocalSet;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -138,6 +138,13 @@ struct MasterStateInner {
     /// blocking would freeze notification delivery for every other
     /// helper sharing this master.
     session_to_helper: Mutex<HashMap<acp::schema::v1::SessionId, HelperRoute>>,
+    /// Latest Usage waiting for its owning helper. Context is replaced by
+    /// SessionId while an omitted optional cost is retained from an
+    /// undelivered prior update.
+    pending_usage: Mutex<
+        HashMap<acp::schema::v1::SessionId, (HelperId, acp::schema::v1::SessionNotification)>,
+    >,
+    usage_generation: watch::Sender<u64>,
     /// Authoritative live-session set, owned by master. Mirrors what
     /// helpers learn via ext-notifications and what the session management view sees
     /// via the standard ACP `session/list` request. Kept beside
@@ -321,6 +328,18 @@ struct MasterStateInner {
     /// throttle (a cold snap distro pays a 40 s ACP init), so a time throttle
     /// alone can't prevent concurrent `wsl.exe` processes — this guard does.
     wsl_seed_in_flight: std::sync::atomic::AtomicBool,
+}
+
+async fn bind_session_route(
+    state: &MasterStateInner,
+    session_id: acp::schema::v1::SessionId,
+    route: HelperRoute,
+) -> usize {
+    let mut routes = state.session_to_helper.lock().await;
+    let mut pending_usage = state.pending_usage.lock().await;
+    pending_usage.remove(&session_id);
+    routes.insert(session_id, route);
+    routes.len()
 }
 
 /// Canonical key for the agent-CLI pool: the full agent command line
@@ -541,6 +560,29 @@ impl MasterClient {
         match route {
             Some((snap_helper_id, tx, drops)) => {
                 use std::sync::atomic::Ordering;
+                if kind == "usage_update" {
+                    let mut args = args;
+                    let mut pending = self.state.pending_usage.lock().await;
+                    if let Some((pending_owner, pending_notification)) = pending.get(&sid) {
+                        if *pending_owner == snap_helper_id {
+                            if let (
+                                acp::schema::v1::SessionUpdate::UsageUpdate(previous),
+                                acp::schema::v1::SessionUpdate::UsageUpdate(incoming),
+                            ) = (&pending_notification.update, &mut args.update)
+                            {
+                                if incoming.cost.is_none() {
+                                    incoming.cost = previous.cost.clone();
+                                }
+                            }
+                        }
+                    }
+                    pending.insert(sid.clone(), (snap_helper_id, args));
+                    drop(pending);
+                    self.state
+                        .usage_generation
+                        .send_modify(|generation| *generation = generation.wrapping_add(1));
+                    return Ok(());
+                }
                 // `try_send` rather than `send().await`: a slow helper
                 // pipe must not back-pressure this trait method, which
                 // is driven by the agent CLI's I/O loop and is shared
@@ -800,6 +842,7 @@ fn notification_kind(notif: &acp::schema::v1::SessionNotification) -> &'static s
         Plan(_) => "plan",
         CurrentModeUpdate { .. } => "current_mode_update",
         AvailableCommandsUpdate { .. } => "available_commands_update",
+        UsageUpdate(_) => "usage_update",
         _ => "other",
     }
 }
@@ -1057,19 +1100,17 @@ impl HelperHandler {
         let forwarder = self.forwarder_for_route("new_session")?;
         // Record routing entry BEFORE returning so the helper can't
         // race a session/update notification.
-        let registry_size = {
-            let mut map = self.state.session_to_helper.lock().await;
-            map.insert(
-                resp.session_id.clone(),
-                HelperRoute {
-                    helper_id: self.helper_id,
-                    notif_tx: self.notif_tx.clone(),
-                    forwarder: Some(forwarder),
-                    consecutive_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                },
-            );
-            map.len()
-        };
+        let registry_size = bind_session_route(
+            &self.state,
+            resp.session_id.clone(),
+            HelperRoute {
+                helper_id: self.helper_id,
+                notif_tx: self.notif_tx.clone(),
+                forwarder: Some(forwarder),
+                consecutive_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        )
+        .await;
         // Mirror the binding into the live-session registry. Lock
         // ordering matches the doc on `MasterStateInner::registry`:
         // `session_to_helper` is no longer held here, so the upsert
@@ -1183,18 +1224,17 @@ impl HelperHandler {
         // any peer-visible flicker.
         let agent = self.resolved_agent("load_session")?;
         let forwarder = self.forwarder_for_route("load_session")?;
-        {
-            let mut map = self.state.session_to_helper.lock().await;
-            map.insert(
-                session_id.clone(),
-                HelperRoute {
-                    helper_id: self.helper_id,
-                    notif_tx: self.notif_tx.clone(),
-                    forwarder: Some(forwarder),
-                    consecutive_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                },
-            );
-        }
+        bind_session_route(
+            &self.state,
+            session_id.clone(),
+            HelperRoute {
+                helper_id: self.helper_id,
+                notif_tx: self.notif_tx.clone(),
+                forwarder: Some(forwarder),
+                consecutive_drops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        )
+        .await;
         // Orphan re-bind fast path: this session's previous helper
         // disconnected but the shared CLI still has it loaded (tracked in
         // `orphaned_sessions` under this agent's key). Re-attach onto the
@@ -1855,6 +1895,8 @@ async fn run_master_loop(cli: Cli, pipe_name: String) -> Result<()> {
 
     let inner = Arc::new(MasterStateInner {
         session_to_helper: Mutex::new(HashMap::new()),
+        pending_usage: Mutex::new(HashMap::new()),
+        usage_generation: watch::channel(0u64).0,
         registry: crate::session_registry::InMemoryRegistry::shared(),
         helper_ext_subscribers: Mutex::new(HashMap::new()),
         wt,
@@ -2508,6 +2550,7 @@ async fn serve_helper(
 
     let (notif_tx, mut notif_rx) =
         mpsc::channel::<acp::schema::v1::SessionNotification>(NOTIF_CHANNEL_CAPACITY);
+    let mut usage_generation_rx = state.usage_generation.subscribe();
 
     // Second channel: master-originated ExtNotifications fanned out by
     // `broadcast_ext_to_helpers`. Kept separate from `notif_tx` so the
@@ -2606,6 +2649,34 @@ async fn serve_helper(
                         error = %err,
                         "forwarding session_notification to helper failed"
                     );
+                }
+            }
+            changed = usage_generation_rx.changed() => {
+                if changed.is_err() {
+                    continue;
+                }
+                let pending = {
+                    let mut pending = state.pending_usage.lock().await;
+                    let session_ids = pending
+                        .iter()
+                        .filter_map(|(session_id, (owner, _))| (*owner == helper_id).then(|| session_id.clone()))
+                        .collect::<Vec<_>>();
+                    session_ids
+                        .into_iter()
+                        .filter_map(|session_id| pending.remove(&session_id).map(|(_, notification)| notification))
+                        .collect::<Vec<_>>()
+                };
+                for notification in pending {
+                    let session_id = notification.session_id.clone();
+                    if let Err(error) = agent_side_conn.session_notification(notification).await {
+                        tracing::warn!(
+                            target: "master",
+                            helper_id = ?helper_id,
+                            session_id = ?session_id,
+                            error = %error,
+                            "forwarding coalesced usage update to helper failed"
+                        );
+                    }
                 }
             }
             Some(ext) = ext_rx.recv() => {
@@ -2763,6 +2834,12 @@ async fn drop_sessions_for_helper(
         map.retain(|_, route| route.helper_id != helper_id);
         victims
     };
+    {
+        let mut pending_usage = state.pending_usage.lock().await;
+        for session_id in &victims {
+            pending_usage.remove(session_id);
+        }
+    }
     for sid in &victims {
         state.registry.remove(sid).await;
         // Broadcast removal so every still-attached helper drops the
