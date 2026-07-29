@@ -28,9 +28,15 @@ namespace TerminalApp::AgentUsage
         bool operator==(const Item&) const = default;
     };
 
+    struct PrimaryDisplayItem
+    {
+        std::wstring text;
+        std::wstring fullText;
+    };
+
     struct PrimaryDisplay
     {
-        std::vector<std::wstring> texts;
+        std::vector<PrimaryDisplayItem> items;
         bool visible{ false };
     };
 

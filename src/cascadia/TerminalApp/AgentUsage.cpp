@@ -13,6 +13,7 @@ namespace
     constexpr size_t MaxUnitIdLength = 16;
     constexpr size_t MaxScopeLength = 32;
     constexpr size_t MaxSourceLength = 32;
+    constexpr int64_t MaxFormattedIntegerDigits = 512;
 
     std::string requiredString(const Json::Value& item, const char* key, const size_t maxLength)
     {
@@ -66,6 +67,152 @@ namespace
             }
         }
         return index == text.size();
+    }
+
+    std::wstring formatCostAmount(const std::string_view text)
+    {
+        const auto exponentMarker = text.find_first_of("eE");
+        const auto mantissa = text.substr(0, exponentMarker);
+        const auto decimalPoint = mantissa.find('.');
+        const auto integerDigits = decimalPoint == std::string_view::npos ? mantissa.size() : decimalPoint;
+
+        std::string digits;
+        digits.reserve(mantissa.size());
+        for (const auto ch : mantissa)
+        {
+            if (ch != '.')
+            {
+                digits.push_back(ch);
+            }
+        }
+
+        int64_t exponent = 0;
+        if (exponentMarker != std::string_view::npos)
+        {
+            auto index = exponentMarker + 1;
+            const auto negative = index < text.size() && text[index] == '-';
+            if (index < text.size() && (text[index] == '+' || text[index] == '-'))
+            {
+                ++index;
+            }
+            for (; index < text.size(); ++index)
+            {
+                const auto digit = static_cast<int64_t>(text[index] - '0');
+                exponent = std::min<int64_t>(MaxFormattedIntegerDigits + 1, exponent * 10 + digit);
+            }
+            if (negative)
+            {
+                exponent = -exponent;
+            }
+        }
+
+        const auto decimalPosition = static_cast<int64_t>(integerDigits) + exponent;
+        const auto firstNonZero = digits.find_first_not_of('0');
+        if (firstNonZero == std::string::npos)
+        {
+            return L"0.00";
+        }
+
+        // Positive values below one cent should not be visually rounded to zero.
+        if (static_cast<int64_t>(firstNonZero) > decimalPosition + 1)
+        {
+            return L"<0.01";
+        }
+
+        // Standard ACP cost originates as a finite f64, so its fixed form is
+        // bounded. Keep the UI safe if a synthetic normalized event bypasses
+        // that boundary with an extreme exponent.
+        if (decimalPosition > MaxFormattedIntegerDigits)
+        {
+            return til::u8u16(text);
+        }
+
+        const auto digitAt = [&](const int64_t position) {
+            return position >= 0 && position < static_cast<int64_t>(digits.size()) ?
+                       digits[static_cast<size_t>(position)] :
+                       '0';
+        };
+
+        std::string integer;
+        if (decimalPosition > 0)
+        {
+            integer.reserve(static_cast<size_t>(decimalPosition));
+            for (int64_t position = 0; position < decimalPosition; ++position)
+            {
+                integer.push_back(digitAt(position));
+            }
+            const auto firstSignificant = integer.find_first_not_of('0');
+            integer.erase(0, firstSignificant == std::string::npos ? integer.size() - 1 : firstSignificant);
+        }
+        else
+        {
+            integer = "0";
+        }
+
+        std::string rounded = integer;
+        rounded.push_back(digitAt(decimalPosition));
+        rounded.push_back(digitAt(decimalPosition + 1));
+        if (digitAt(decimalPosition + 2) >= '5')
+        {
+            auto position = rounded.size();
+            while (position > 0 && rounded[position - 1] == '9')
+            {
+                rounded[--position] = '0';
+            }
+            if (position == 0)
+            {
+                rounded.insert(rounded.begin(), '1');
+            }
+            else
+            {
+                ++rounded[position - 1];
+            }
+        }
+
+        rounded.insert(rounded.end() - 2, '.');
+        return til::u8u16(rounded);
+    }
+
+    std::vector<TerminalApp::AgentUsage::PrimaryDisplayItem> buildPrimaryDisplayItems(
+        const std::vector<TerminalApp::AgentUsage::Item>& items,
+        const std::wstring_view tokensUnit)
+    {
+        using namespace TerminalApp::AgentUsage;
+
+        std::vector<PrimaryDisplayItem> displayItems;
+        displayItems.reserve(std::min(items.size(), MaxPrimaryItems));
+        for (const auto metricId : { "acp.context.window", "acp.billing.cost" })
+        {
+            const auto item = std::ranges::find(items, metricId, &Item::metricId);
+            if (item == items.end() || item->stale || displayItems.size() == MaxPrimaryItems)
+            {
+                continue;
+            }
+
+            if (item->metricId == "acp.context.window" && item->limitDecimalText)
+            {
+                auto text = til::u8u16(item->valueDecimalText);
+                text += L" / ";
+                text += til::u8u16(*item->limitDecimalText);
+                text += L" ";
+                text += tokensUnit;
+                displayItems.emplace_back(PrimaryDisplayItem{ .text = std::move(text) });
+            }
+            else
+            {
+                auto fullText = til::u8u16(item->valueDecimalText);
+                fullText += L" ";
+                fullText += til::u8u16(item->unitId);
+                auto text = formatCostAmount(item->valueDecimalText);
+                text += L" ";
+                text += til::u8u16(item->unitId);
+                displayItems.emplace_back(PrimaryDisplayItem{
+                    .text = std::move(text),
+                    .fullText = std::move(fullText),
+                });
+            }
+        }
+        return displayItems;
     }
 }
 
@@ -135,37 +282,12 @@ namespace TerminalApp::AgentUsage
         const std::vector<Item>& items,
         const std::wstring_view tokensUnit)
     {
+        const auto displayItems = buildPrimaryDisplayItems(items, tokensUnit);
         std::vector<std::wstring> texts;
-        texts.reserve(std::min(items.size(), MaxPrimaryItems));
-        const auto append = [&](const Item& item) {
-            if (texts.size() == MaxPrimaryItems)
-            {
-                return;
-            }
-
-            auto text = til::u8u16(item.valueDecimalText);
-            if (item.metricId == "acp.context.window" && item.limitDecimalText)
-            {
-                text += L" / ";
-                text += til::u8u16(*item.limitDecimalText);
-                text += L" ";
-                text += tokensUnit;
-            }
-            else
-            {
-                text += L" ";
-                text += til::u8u16(item.unitId);
-            }
-            texts.emplace_back(std::move(text));
-        };
-
-        for (const auto metricId : { "acp.context.window", "acp.billing.cost" })
+        texts.reserve(displayItems.size());
+        for (const auto& item : displayItems)
         {
-            const auto item = std::ranges::find(items, metricId, &Item::metricId);
-            if (item != items.end() && !item->stale)
-            {
-                append(*item);
-            }
+            texts.emplace_back(item.text);
         }
         return texts;
     }
@@ -174,10 +296,10 @@ namespace TerminalApp::AgentUsage
         const std::vector<Item>& items,
         const std::wstring_view tokensUnit)
     {
-        auto texts = BuildPrimaryDisplayTexts(items, tokensUnit);
-        const auto visible = !texts.empty();
+        auto displayItems = buildPrimaryDisplayItems(items, tokensUnit);
+        const auto visible = !displayItems.empty();
         return PrimaryDisplay{
-            .texts = std::move(texts),
+            .items = std::move(displayItems),
             .visible = visible,
         };
     }

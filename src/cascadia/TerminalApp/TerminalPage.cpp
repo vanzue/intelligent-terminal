@@ -2746,14 +2746,19 @@ namespace winrt::TerminalApp::implementation
                     impl->GetAgentUsage(),
                     RS_(L"Usage_TokensUnit"));
                 usageVisible = display.visible;
-                for (const auto& text : display.texts)
+                for (const auto& item : display.items)
                 {
                     TextBlock block;
-                    block.Text(text);
+                    block.Text(item.text);
                     block.FontSize(12);
                     block.VerticalAlignment(VerticalAlignment::Center);
                     block.TextTrimming(TextTrimming::CharacterEllipsis);
                     block.MaxWidth(180);
+                    if (!item.fullText.empty())
+                    {
+                        ToolTipService::SetToolTip(block, box_value(item.fullText));
+                        Automation::AutomationProperties::SetHelpText(block, item.fullText);
+                    }
                     usageGroup.Children().Append(block);
                 }
             }

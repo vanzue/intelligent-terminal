@@ -45,6 +45,7 @@ namespace TerminalAppUnitTests
         TEST_METHOD(BuildPrimaryDisplayTextsIgnoresInputOutput);
         TEST_METHOD(BuildPrimaryDisplayTextsCapsMainBarItems);
         TEST_METHOD(BuildPrimaryDisplayShowsCostWithoutTokens);
+        TEST_METHOD(BuildPrimaryDisplayRoundsCostAndPreservesFullText);
         TEST_METHOD(BuildPrimaryDisplayShowsTokensWithoutCost);
         TEST_METHOD(BuildPrimaryDisplayHidesStaleMetrics);
         TEST_METHOD(BuildPrimaryDisplayHidesInputOutputOnly);
@@ -171,7 +172,7 @@ namespace TerminalAppUnitTests
 
         VERIFY_ARE_EQUAL(static_cast<size_t>(2), texts.size());
         VERIFY_ARE_EQUAL(std::wstring{ L"1024 / 8192 Tokens" }, texts[0]);
-        VERIFY_ARE_EQUAL(std::wstring{ L"0.004 USD" }, texts[1]);
+        VERIFY_ARE_EQUAL(std::wstring{ L"<0.01 USD" }, texts[1]);
     }
 
     void AgentUsageTests::BuildPrimaryDisplayTextsIgnoresInputOutput()
@@ -189,7 +190,7 @@ namespace TerminalAppUnitTests
 
         VERIFY_ARE_EQUAL(static_cast<size_t>(2), texts.size());
         VERIFY_ARE_EQUAL(std::wstring{ L"1024 / 8192 Tokens" }, texts[0]);
-        VERIFY_ARE_EQUAL(std::wstring{ L"0.004 USD" }, texts[1]);
+        VERIFY_ARE_EQUAL(std::wstring{ L"<0.01 USD" }, texts[1]);
     }
 
     void AgentUsageTests::BuildPrimaryDisplayTextsCapsMainBarItems()
@@ -241,8 +242,36 @@ namespace TerminalAppUnitTests
         const auto display = TerminalApp::AgentUsage::BuildPrimaryDisplay(items, L"Tokens");
 
         VERIFY_IS_TRUE(display.visible);
-        VERIFY_ARE_EQUAL(static_cast<size_t>(1), display.texts.size());
-        VERIFY_ARE_EQUAL(std::wstring{ L"0.004 USD" }, display.texts[0]);
+        VERIFY_ARE_EQUAL(static_cast<size_t>(1), display.items.size());
+        VERIFY_ARE_EQUAL(std::wstring{ L"<0.01 USD" }, display.items[0].text);
+        VERIFY_ARE_EQUAL(std::wstring{ L"0.004 USD" }, display.items[0].fullText);
+    }
+
+    void AgentUsageTests::BuildPrimaryDisplayRoundsCostAndPreservesFullText()
+    {
+        const auto build = [](const std::string& value) {
+            return TerminalApp::AgentUsage::BuildPrimaryDisplay(
+                { TerminalApp::AgentUsage::Item{
+                    .metricId = "acp.billing.cost",
+                    .valueDecimalText = value,
+                    .unitId = "USD",
+                    .scope = "session",
+                    .source = "acp_standard",
+                } },
+                L"Tokens");
+        };
+
+        const auto roundsUp = build("1.235");
+        VERIFY_ARE_EQUAL(std::wstring{ L"1.24 USD" }, roundsUp.items[0].text);
+        VERIFY_ARE_EQUAL(std::wstring{ L"1.235 USD" }, roundsUp.items[0].fullText);
+
+        const auto roundsDown = build("1.234");
+        VERIFY_ARE_EQUAL(std::wstring{ L"1.23 USD" }, roundsDown.items[0].text);
+        VERIFY_ARE_EQUAL(std::wstring{ L"1.234 USD" }, roundsDown.items[0].fullText);
+
+        const auto zero = build("0");
+        VERIFY_ARE_EQUAL(std::wstring{ L"0.00 USD" }, zero.items[0].text);
+        VERIFY_ARE_EQUAL(std::wstring{ L"0 USD" }, zero.items[0].fullText);
     }
 
     void AgentUsageTests::BuildPrimaryDisplayShowsTokensWithoutCost()
@@ -261,8 +290,9 @@ namespace TerminalAppUnitTests
         const auto display = TerminalApp::AgentUsage::BuildPrimaryDisplay(items, L"Tokens");
 
         VERIFY_IS_TRUE(display.visible);
-        VERIFY_ARE_EQUAL(static_cast<size_t>(1), display.texts.size());
-        VERIFY_ARE_EQUAL(std::wstring{ L"1024 / 8192 Tokens" }, display.texts[0]);
+        VERIFY_ARE_EQUAL(static_cast<size_t>(1), display.items.size());
+        VERIFY_ARE_EQUAL(std::wstring{ L"1024 / 8192 Tokens" }, display.items[0].text);
+        VERIFY_IS_TRUE(display.items[0].fullText.empty());
     }
 
     void AgentUsageTests::BuildPrimaryDisplayHidesStaleMetrics()
@@ -279,8 +309,9 @@ namespace TerminalAppUnitTests
             L"Tokens");
 
         VERIFY_IS_TRUE(display.visible);
-        VERIFY_ARE_EQUAL(static_cast<size_t>(1), display.texts.size());
-        VERIFY_ARE_EQUAL(std::wstring{ L"0.004 USD" }, display.texts[0]);
+        VERIFY_ARE_EQUAL(static_cast<size_t>(1), display.items.size());
+        VERIFY_ARE_EQUAL(std::wstring{ L"<0.01 USD" }, display.items[0].text);
+        VERIFY_ARE_EQUAL(std::wstring{ L"0.004 USD" }, display.items[0].fullText);
     }
 
     void AgentUsageTests::BuildPrimaryDisplayHidesInputOutputOnly()
@@ -305,7 +336,7 @@ namespace TerminalAppUnitTests
         const auto display = TerminalApp::AgentUsage::BuildPrimaryDisplay(items, L"Tokens");
 
         VERIFY_IS_FALSE(display.visible);
-        VERIFY_IS_TRUE(display.texts.empty());
+        VERIFY_IS_TRUE(display.items.empty());
     }
 
     void AgentUsageTests::BuildPrimaryDisplayHidesAfterContainedError()
@@ -325,7 +356,7 @@ namespace TerminalAppUnitTests
         const auto display = TerminalApp::AgentUsage::BuildPrimaryDisplay(cache, L"Tokens");
 
         VERIFY_IS_FALSE(display.visible);
-        VERIFY_IS_TRUE(display.texts.empty());
+        VERIFY_IS_TRUE(display.items.empty());
     }
 
     void AgentUsageTests::BuildPrimaryDisplayHidesWhenNothingReported()
@@ -333,6 +364,6 @@ namespace TerminalAppUnitTests
         const auto display = TerminalApp::AgentUsage::BuildPrimaryDisplay({}, L"Tokens");
 
         VERIFY_IS_FALSE(display.visible);
-        VERIFY_IS_TRUE(display.texts.empty());
+        VERIFY_IS_TRUE(display.items.empty());
     }
 }
