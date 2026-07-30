@@ -1557,6 +1557,20 @@ fn notif(sid: &str, update: acp::schema::v1::SessionUpdate) -> acp::schema::v1::
     acp::schema::v1::SessionNotification::new(acp::schema::v1::SessionId::new(sid), update)
 }
 
+#[derive(Clone)]
+struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// An `AgentThoughtChunk` update becomes an `AgentThoughtChunk` event carrying
 /// the session id and the chunk text.
 #[tokio::test]
@@ -1597,6 +1611,128 @@ async fn session_notification_routes_user_message_replay_chunk() {
         }
         _ => panic!("expected UserMessageReplayChunk"),
     }
+}
+
+#[tokio::test]
+async fn session_notification_routes_usage_update() {
+    let (client, mut rx) = bare_client();
+    let usage = acp::schema::v1::UsageUpdate::new(1_024, 8_192)
+        .cost(acp::schema::v1::Cost::new(0.004, "USD"));
+    client
+        .session_notification(notif(
+            "s1",
+            acp::schema::v1::SessionUpdate::UsageUpdate(usage),
+        ))
+        .await
+        .unwrap();
+
+    match rx.try_recv() {
+        Ok(AppEvent::UsageReported {
+            session_id,
+            snapshot,
+        }) => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(
+                snapshot.context,
+                Some(crate::usage::UsageContext {
+                    used: 1_024,
+                    size: 8_192,
+                })
+            );
+            assert_eq!(snapshot.cost.expect("cost").currency, "USD");
+        }
+        _ => panic!("expected UsageReported"),
+    }
+}
+
+#[tokio::test]
+async fn session_notification_routes_provider_reported_zero_size() {
+    let (client, mut rx) = bare_client();
+    client
+        .session_notification(notif(
+            "s1",
+            acp::schema::v1::SessionUpdate::UsageUpdate(
+                acp::schema::v1::UsageUpdate::new(1, 0),
+            ),
+        ))
+        .await
+        .expect("provider-owned capacity must not be rejected by the client");
+
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::UsageReported { session_id, snapshot })
+            if session_id == "s1"
+                && snapshot.context == Some(crate::usage::UsageContext { used: 1, size: 0 })
+    ));
+}
+
+#[tokio::test]
+async fn notification_dispatch_routes_over_capacity_usage_and_keeps_chat_flow() {
+    let (client, mut rx) = bare_client();
+    client
+        .dispatch_session_notification(notif(
+            "s1",
+            acp::schema::v1::SessionUpdate::UsageUpdate(acp::schema::v1::UsageUpdate::new(101, 100)),
+        ))
+        .await;
+
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::UsageReported { session_id, snapshot })
+            if session_id == "s1"
+                && snapshot.context == Some(crate::usage::UsageContext { used: 101, size: 100 })
+    ));
+
+    client
+        .dispatch_session_notification(notif(
+            "s1",
+            acp::schema::v1::SessionUpdate::AgentMessageChunk(acp::schema::v1::ContentChunk::new(
+                "still connected".into(),
+            )),
+        ))
+        .await;
+
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::AgentMessageChunk { session_id, text })
+            if session_id == "s1" && text == "still connected"
+    ));
+}
+
+#[tokio::test]
+async fn invalid_optional_cost_preserves_context_without_logging_values() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || SharedLogWriter(writer.clone()))
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    let (client, mut rx) = bare_client();
+    client
+        .dispatch_session_notification(notif(
+            "s1",
+            acp::schema::v1::SessionUpdate::UsageUpdate(
+                acp::schema::v1::UsageUpdate::new(123_456_789, 987_654_321)
+                    .cost(acp::schema::v1::Cost::new(-1.0, "USD")),
+            ),
+        ))
+        .await;
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::UsageReported { snapshot, .. })
+            if snapshot.context == Some(crate::usage::UsageContext {
+                used: 123_456_789,
+                size: 987_654_321,
+            }) && snapshot.cost.is_none()
+    ));
+
+    let logs = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains("987654321"));
+    assert!(!logs.contains("123456789"));
 }
 
 /// A `ToolCall` update becomes a `ToolCall` event with the tool id and title.
