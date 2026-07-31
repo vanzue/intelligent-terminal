@@ -60,7 +60,7 @@
         "type": "cargo",
         "cargo": {
           "name": "anstream",
-          "version": "0.6.21"
+          "version": "1.0.0"
         }
       }
     },
@@ -69,7 +69,7 @@
         "type": "cargo",
         "cargo": {
           "name": "anstyle",
-          "version": "1.0.13"
+          "version": "1.0.14"
         }
       }
     },
@@ -78,7 +78,7 @@
         "type": "cargo",
         "cargo": {
           "name": "anstyle-parse",
-          "version": "0.2.7"
+          "version": "1.0.0"
         }
       }
     },
@@ -105,7 +105,16 @@
         "type": "cargo",
         "cargo": {
           "name": "anyhow",
-          "version": "1.0.102"
+          "version": "1.0.104"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
+          "name": "approx",
+          "version": "0.5.1"
         }
       }
     },
@@ -159,7 +168,7 @@
         "type": "cargo",
         "cargo": {
           "name": "async-trait",
-          "version": "0.1.89"
+          "version": "0.1.91"
         }
       }
     },
@@ -231,7 +240,7 @@
         "type": "cargo",
         "cargo": {
           "name": "bitflags",
-          "version": "2.11.0"
+          "version": "2.13.1"
         }
       }
     },
@@ -268,6 +277,15 @@
         "cargo": {
           "name": "bstr",
           "version": "1.12.1"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
+          "name": "by_address",
+          "version": "1.2.1"
         }
       }
     },
@@ -330,7 +348,7 @@
         "type": "cargo",
         "cargo": {
           "name": "clap",
-          "version": "4.5.60"
+          "version": "4.6.4"
         }
       }
     },
@@ -339,7 +357,7 @@
         "type": "cargo",
         "cargo": {
           "name": "clap_builder",
-          "version": "4.5.60"
+          "version": "4.6.2"
         }
       }
     },
@@ -348,7 +366,7 @@
         "type": "cargo",
         "cargo": {
           "name": "clap_derive",
-          "version": "4.5.55"
+          "version": "4.6.4"
         }
       }
     },
@@ -412,6 +430,15 @@
         "cargo": {
           "name": "crc32fast",
           "version": "1.5.0"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
+          "name": "critical-section",
+          "version": "1.2.0"
         }
       }
     },
@@ -653,6 +680,15 @@
       "component": {
         "type": "cargo",
         "cargo": {
+          "name": "fast-srgb8",
+          "version": "1.0.0"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
           "name": "fastrand",
           "version": "2.4.1"
         }
@@ -744,7 +780,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -753,7 +789,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-channel",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -771,7 +807,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-core",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -780,7 +816,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-executor",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -789,7 +825,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-io",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -807,7 +843,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-macro",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -816,7 +852,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-sink",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -825,7 +861,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-task",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -834,7 +870,7 @@
         "type": "cargo",
         "cargo": {
           "name": "futures-util",
-          "version": "0.3.32"
+          "version": "0.3.33"
         }
       }
     },
@@ -907,6 +943,15 @@
         "cargo": {
           "name": "hashbrown",
           "version": "0.16.1"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
+          "name": "hashbrown",
+          "version": "0.17.1"
         }
       }
     },
@@ -1067,6 +1112,15 @@
       "component": {
         "type": "cargo",
         "cargo": {
+          "name": "libm",
+          "version": "0.2.16"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
           "name": "line-clipping",
           "version": "0.3.5"
         }
@@ -1104,7 +1158,7 @@
         "type": "cargo",
         "cargo": {
           "name": "lru",
-          "version": "0.16.3"
+          "version": "0.18.1"
         }
       }
     },
@@ -1267,6 +1321,24 @@
         "cargo": {
           "name": "ordered-float",
           "version": "4.6.0"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
+          "name": "palette",
+          "version": "0.7.6"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
+          "name": "palette_derive",
+          "version": "0.7.6"
         }
       }
     },
@@ -1491,7 +1563,7 @@
         "type": "cargo",
         "cargo": {
           "name": "ratatui",
-          "version": "0.30.0"
+          "version": "0.30.2"
         }
       }
     },
@@ -1500,7 +1572,7 @@
         "type": "cargo",
         "cargo": {
           "name": "ratatui-core",
-          "version": "0.1.0"
+          "version": "0.1.2"
         }
       }
     },
@@ -1509,7 +1581,7 @@
         "type": "cargo",
         "cargo": {
           "name": "ratatui-crossterm",
-          "version": "0.1.0"
+          "version": "0.1.2"
         }
       }
     },
@@ -1518,7 +1590,7 @@
         "type": "cargo",
         "cargo": {
           "name": "ratatui-macros",
-          "version": "0.7.0"
+          "version": "0.7.2"
         }
       }
     },
@@ -1526,7 +1598,7 @@
       "component": {
         "type": "cargo",
         "cargo": {
-          "name": "ratatui-termwiz",
+          "name": "ratatui-termina",
           "version": "0.1.0"
         }
       }
@@ -1535,8 +1607,17 @@
       "component": {
         "type": "cargo",
         "cargo": {
+          "name": "ratatui-termwiz",
+          "version": "0.1.2"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
           "name": "ratatui-widgets",
-          "version": "0.3.0"
+          "version": "0.3.2"
         }
       }
     },
@@ -1698,7 +1779,7 @@
         "type": "cargo",
         "cargo": {
           "name": "serde",
-          "version": "1.0.228"
+          "version": "1.0.229"
         }
       }
     },
@@ -1707,7 +1788,7 @@
         "type": "cargo",
         "cargo": {
           "name": "serde_core",
-          "version": "1.0.228"
+          "version": "1.0.229"
         }
       }
     },
@@ -1716,7 +1797,7 @@
         "type": "cargo",
         "cargo": {
           "name": "serde_derive",
-          "version": "1.0.228"
+          "version": "1.0.229"
         }
       }
     },
@@ -1734,7 +1815,7 @@
         "type": "cargo",
         "cargo": {
           "name": "serde_json",
-          "version": "1.0.149"
+          "version": "1.0.151"
         }
       }
     },
@@ -1887,25 +1968,7 @@
         "type": "cargo",
         "cargo": {
           "name": "strum",
-          "version": "0.27.2"
-        }
-      }
-    },
-    {
-      "component": {
-        "type": "cargo",
-        "cargo": {
-          "name": "strum",
           "version": "0.28.0"
-        }
-      }
-    },
-    {
-      "component": {
-        "type": "cargo",
-        "cargo": {
-          "name": "strum_macros",
-          "version": "0.27.2"
         }
       }
     },
@@ -1949,8 +2012,26 @@
       "component": {
         "type": "cargo",
         "cargo": {
+          "name": "syn",
+          "version": "3.0.3"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
           "name": "sys-locale",
           "version": "0.3.2"
+        }
+      }
+    },
+    {
+      "component": {
+        "type": "cargo",
+        "cargo": {
+          "name": "termina",
+          "version": "0.3.3"
         }
       }
     },
@@ -2094,7 +2175,7 @@
         "type": "cargo",
         "cargo": {
           "name": "tokio-util",
-          "version": "0.7.18"
+          "version": "0.7.19"
         }
       }
     },
@@ -2310,7 +2391,7 @@
         "type": "cargo",
         "cargo": {
           "name": "uuid",
-          "version": "1.22.0"
+          "version": "1.24.0"
         }
       }
     },
