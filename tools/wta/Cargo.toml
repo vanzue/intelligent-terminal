@@ -50,7 +50,7 @@ tracing-appender = "0.2"
 # for the matching provider GUID and src/cascadia/TerminalApp/AppLogic.cpp
 # for the event-emission style we mirror here.
 tracelogging = "1"
-which = "7"
+which = "8"
 uuid = { version = "1", features = ["v4"] }
 rust-i18n = "3"
 sys-locale = "0.3"
