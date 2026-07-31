@@ -1,6 +1,4 @@
 # Pin Rust version for CI reproducibility.
-# The ms-prod channel is resolved by MSRustup (RustInstaller ADO task).
-# Local dev with standard rustup ignores the ms-prod- prefix and uses
-# the latest stable toolchain instead.
+# Temporarily use the public channel so Dependabot can resolve Cargo updates.
 [toolchain]
-channel = "ms-prod-1.93"
+channel = "1.93"
