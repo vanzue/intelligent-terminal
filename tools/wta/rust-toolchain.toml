@@ -1,4 +1,4 @@
-# Pin Rust version for CI reproducibility.
-# Temporarily use the public channel so Dependabot can resolve Cargo updates.
+# Pin the public Rust version for local development and GitHub automation.
+# Azure DevOps explicitly overrides this with the matching ms-prod toolchain.
 [toolchain]
 channel = "1.93"
