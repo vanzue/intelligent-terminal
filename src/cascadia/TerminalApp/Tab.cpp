@@ -1207,6 +1207,7 @@ namespace winrt::TerminalApp::implementation
         }
         _paneActivityStates.erase(paneId);
         _UpdateActivityState();
+        ActivityChanged.raise();
     }
 
     // Method Description:
@@ -1632,7 +1633,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         PaneActivity::ApplySignal(state->second, signal);
+        state->second.receivedSequence = ++_activitySequence;
         _UpdateActivityState();
+        ActivityChanged.raise();
     }
 
     void Tab::_ApplyAgentActivity(const uint32_t paneId, const TerminalApp::AgentPaneContent& content)
@@ -1759,7 +1762,7 @@ namespace winrt::TerminalApp::implementation
                                          state.lastOperationKind,
                     .progressState = state.progressState,
                     .progressValue = state.progressValue,
-                    .revision = state.revision,
+                    .receivedSequence = state.receivedSequence,
                     .summary = state.summary,
                     .lastCommand = state.lastCommand,
                     .lastExitCode = state.lastExitCode,

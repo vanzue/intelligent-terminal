@@ -641,6 +641,24 @@ are omitted. Entries are ordered by:
 ActionRequired > Error > Update > Working
 ```
 
+The tab-row Activity Center entry remains available in the empty state and
+always uses the monochrome Segoe Fluent `Recent` glyph. It changes only from
+subdued to normal opacity when a deliverable entry exists. It does not use
+color, a numeric badge, or a notification glyph.
+
+Delivery is a projection over pane state, not a separate state store. The
+currently active tab never contributes entries. The global
+`activityCenterDelivery` setting accepts `attentionOnly` (the default) or
+`allActivity`. `attentionOnly` delivers only `Error` and `ActionRequired`;
+routine `Working` and completed `Update` states remain available to tab-local
+status but do not enter Activity Center. `allActivity` includes every
+non-idle/current-attention entry from inactive tabs.
+
+Each tab assigns a monotonically increasing receive sequence to every pane
+activity signal. When panes have the same attention and phase priority, the
+most recently received signal wins the tab's dominant indicator. Per-pane
+revisions are not compared across panes.
+
 Each entry is a wide, compact two-line row containing:
 
 - state and source in a fixed leading column;

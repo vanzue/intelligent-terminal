@@ -58,6 +58,12 @@ namespace TerminalApp::PaneActivity
         Paused,
     };
 
+    enum class DeliveryMode
+    {
+        AttentionOnly,
+        AllActivity,
+    };
+
     enum class SignalKind
     {
         ConnectionReady,
@@ -99,6 +105,7 @@ namespace TerminalApp::PaneActivity
         uint32_t progressValue{ 0 };
         uint64_t operationId{ 0 };
         uint64_t revision{ 0 };
+        uint64_t receivedSequence{ 0 };
         uint64_t attentionRevision{ 0 };
         bool hasOperation{ false };
         std::wstring summary;
@@ -156,6 +163,22 @@ namespace TerminalApp::PaneActivity
                                   const bool hidden) noexcept
     {
         return tabFocused && !hidden && activePaneId.has_value() && *activePaneId == paneId;
+    }
+
+    constexpr bool ShouldDeliver(const State& state, const DeliveryMode mode, const bool activeTab) noexcept
+    {
+        if (activeTab)
+        {
+            return false;
+        }
+        if (mode == DeliveryMode::AllActivity)
+        {
+            return state.phase == Phase::Working ||
+                   state.phase == Phase::Waiting ||
+                   state.attention != Attention::None;
+        }
+        return state.attention == Attention::Error ||
+               state.attention == Attention::ActionRequired;
     }
 
     inline void ApplySignal(State& state, const Signal& signal)
@@ -335,9 +358,9 @@ namespace TerminalApp::PaneActivity
             const auto paneWins = paneAttention > dominantAttention ||
                                   (paneAttention == dominantAttention && panePhase > dominantPhase) ||
                                   (paneAttention == dominantAttention && panePhase == dominantPhase &&
-                                   pane.state.revision > dominant->state.revision) ||
+                                   pane.state.receivedSequence > dominant->state.receivedSequence) ||
                                   (paneAttention == dominantAttention && panePhase == dominantPhase &&
-                                   pane.state.revision == dominant->state.revision &&
+                                   pane.state.receivedSequence == dominant->state.receivedSequence &&
                                    pane.paneId == activePaneId);
             if (paneWins)
             {

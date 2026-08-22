@@ -141,6 +141,12 @@ namespace winrt::TerminalApp::implementation
         // for it. The Title change will be propagated upwards through the tab's
         // PropertyChanged event handler.
         newTabImpl->ActivePaneChanged({ get_weak(), &TerminalPage::_activePaneChanged });
+        newTabImpl->ActivityChanged([weakThis{ get_weak() }]() {
+            if (const auto page = weakThis.get())
+            {
+                page->_UpdateActivityCenterButton();
+            }
+        });
 
         // The RaiseVisualBell event has been bubbled up to here from the pane,
         // the next part of the chain is bubbling up to app logic, which will
@@ -804,6 +810,7 @@ namespace winrt::TerminalApp::implementation
         _tabs.RemoveAt(tabIndex);
         _tabItems().RemoveAt(tabIndex);
         _UpdateTabIndices();
+        _UpdateActivityCenterButton();
 
         // To close the window here, we need to close the hosting window.
         if (_tabs.Size() == 0)
@@ -1480,6 +1487,7 @@ namespace winrt::TerminalApp::implementation
                 _NotifyAgentTabChanged(tabImplForNotify->StableId());
             }
 
+            _UpdateActivityCenterButton();
             _adjustProcessPriorityThrottled->Run();
         }
         CATCH_LOG();

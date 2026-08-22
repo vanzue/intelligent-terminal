@@ -26,7 +26,7 @@ namespace winrt::TerminalApp::implementation
         ::TerminalApp::PaneActivity::OperationKind operationKind{ ::TerminalApp::PaneActivity::OperationKind::None };
         ::TerminalApp::PaneActivity::ProgressState progressState{ ::TerminalApp::PaneActivity::ProgressState::None };
         uint32_t progressValue{ 0 };
-        uint64_t revision{ 0 };
+        uint64_t receivedSequence{ 0 };
         bool hidden{ false };
         std::wstring summary;
         std::wstring lastCommand;
@@ -227,6 +227,7 @@ namespace winrt::TerminalApp::implementation
         til::typed_event<TerminalApp::TerminalPaneContent> RestartTerminalRequested;
 
         til::typed_event<TerminalApp::Tab, IInspectable> ActivePaneChanged;
+        til::event<winrt::delegate<>> ActivityChanged;
         til::event<winrt::delegate<>> TabRaiseVisualBell;
         til::event<winrt::delegate<winrt::hstring /*title*/, winrt::hstring /*body*/, winrt::TerminalApp::IPaneContent /*content*/>> TabToastNotificationRequested;
         til::typed_event<IInspectable, IInspectable> TaskbarProgressChanged;
@@ -324,6 +325,7 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<uint32_t, ContentEventTokens> _contentEvents;
         std::unordered_map<uint32_t, ::TerminalApp::PaneActivity::State> _paneActivityStates;
         ::TerminalApp::PaneActivity::Aggregate _tabActivity{};
+        uint64_t _activitySequence{ 0 };
 
         winrt::event_token _rootClosedToken{};
 

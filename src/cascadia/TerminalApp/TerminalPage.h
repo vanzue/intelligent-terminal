@@ -329,6 +329,7 @@ namespace winrt::TerminalApp::implementation
         Windows::UI::Xaml::Controls::Grid _tabContent{ nullptr };
         Microsoft::UI::Xaml::Controls::SplitButton _newTabButton{ nullptr };
         Windows::UI::Xaml::Controls::Button _activityCenterButton{ nullptr };
+        Windows::UI::Xaml::Controls::FontIcon _activityCenterIcon{ nullptr };
         Windows::UI::Xaml::Controls::Flyout _activityCenterFlyout{ nullptr };
         Windows::UI::Xaml::Controls::MenuFlyout _workspaceFlyout{ nullptr };
         Windows::UI::Xaml::Controls::Button _workspaceDropdown{ nullptr };
@@ -937,6 +938,7 @@ namespace winrt::TerminalApp::implementation
         void _PopulateQuickFixMenu(const Microsoft::Terminal::Control::TermControl& control, const Windows::UI::Xaml::Controls::MenuFlyout& sender);
         void _PopulateWorkspaceFlyout();
         void _PopulateActivityCenterFlyout();
+        void _UpdateActivityCenterButton();
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _CreateRunAsAdminFlyout(int profileIndex);
 
         winrt::Microsoft::Terminal::Control::TermControl _senderOrActiveControl(const winrt::Windows::Foundation::IInspectable& sender);

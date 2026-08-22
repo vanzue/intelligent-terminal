@@ -345,6 +345,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _settings = settings;
+        _UpdateActivityCenterButton();
 
         // Seed the agent-settings baseline on first load so that later
         // in-memory mutations (e.g. the bottom-bar agent selector click,
@@ -495,6 +496,18 @@ namespace winrt::TerminalApp::implementation
         _workspaceFlyout = tabRowImpl->WorkspaceFlyout();
         _workspaceDropdown = tabRowImpl->WorkspaceDropdown();
 
+        WUX::Controls::Grid activityCenterContent;
+        activityCenterContent.Width(28);
+        activityCenterContent.Height(20);
+        _activityCenterIcon = WUX::Controls::FontIcon{};
+        _activityCenterIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        _activityCenterIcon.FontSize(12);
+        _activityCenterIcon.Glyph(L"\xE823");
+        _activityCenterIcon.HorizontalAlignment(WUX::HorizontalAlignment::Center);
+        _activityCenterIcon.VerticalAlignment(WUX::VerticalAlignment::Center);
+        activityCenterContent.Children().Append(_activityCenterIcon);
+        _activityCenterButton.Content(activityCenterContent);
+
         _activityCenterFlyout = WUX::Controls::Flyout{};
         _activityCenterFlyout.Placement(WUX::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedRight);
         _activityCenterFlyout.Opening([weakThis{ get_weak() }](auto&&, auto&&) {
@@ -504,9 +517,7 @@ namespace winrt::TerminalApp::implementation
             }
         });
         _activityCenterButton.Flyout(_activityCenterFlyout);
-        const auto activityCenterName = RS_fmt(L"NotificationMessage_TabActivity", L"\x2026");
-        WUX::Automation::AutomationProperties::SetName(_activityCenterButton, activityCenterName);
-        WUX::Controls::ToolTipService::SetToolTip(_activityCenterButton, box_value(activityCenterName));
+        _UpdateActivityCenterButton();
 
         // Set the initial workspace name from the window name.
         // Use raw WindowName() so unnamed windows show no text.
@@ -10997,6 +11008,10 @@ namespace winrt::TerminalApp::implementation
         };
 
         std::vector<Item> activities;
+        const auto focusedTab = _GetFocusedTabImpl();
+        const auto deliveryMode = _settings && _settings.GlobalSettings().ActivityCenterDelivery() == L"allActivity" ?
+                                      ::TerminalApp::PaneActivity::DeliveryMode::AllActivity :
+                                      ::TerminalApp::PaneActivity::DeliveryMode::AttentionOnly;
         for (const auto& tab : _tabs)
         {
             const auto tabImpl = _GetTabImpl(tab);
@@ -11006,6 +11021,13 @@ namespace winrt::TerminalApp::implementation
             }
             for (auto&& activity : tabImpl->ActivityEntries())
             {
+                ::TerminalApp::PaneActivity::State deliveryState;
+                deliveryState.phase = activity.phase;
+                deliveryState.attention = activity.attention;
+                if (!::TerminalApp::PaneActivity::ShouldDeliver(deliveryState, deliveryMode, tabImpl == focusedTab))
+                {
+                    continue;
+                }
                 activities.emplace_back(Item{
                     tabImpl->StableId(),
                     tabImpl->GetTabText(),
@@ -11024,7 +11046,7 @@ namespace winrt::TerminalApp::implementation
             const auto rhsPhase = ::TerminalApp::PaneActivity::PhasePriority(rhs.activity.phase);
             return lhsPhase != rhsPhase ?
                        lhsPhase > rhsPhase :
-                       lhs.activity.revision > rhs.activity.revision;
+                       lhs.activity.receivedSequence > rhs.activity.receivedSequence;
         });
 
         WUX::Controls::StackPanel root;
@@ -11219,6 +11241,55 @@ namespace winrt::TerminalApp::implementation
         scrollViewer.Content(cards);
         root.Children().Append(scrollViewer);
         _activityCenterFlyout.Content(root);
+    }
+
+    void TerminalPage::_UpdateActivityCenterButton()
+    {
+        if (!_activityCenterButton || !_activityCenterIcon)
+        {
+            return;
+        }
+
+        uint32_t activeCount = 0;
+        uint32_t attentionCount = 0;
+        const auto focusedTab = _GetFocusedTabImpl();
+        const auto deliveryMode = _settings && _settings.GlobalSettings().ActivityCenterDelivery() == L"allActivity" ?
+                                      ::TerminalApp::PaneActivity::DeliveryMode::AllActivity :
+                                      ::TerminalApp::PaneActivity::DeliveryMode::AttentionOnly;
+        for (const auto& tab : _tabs)
+        {
+            if (const auto tabImpl = _GetTabImpl(tab))
+            {
+                for (const auto& activity : tabImpl->ActivityEntries())
+                {
+                    ::TerminalApp::PaneActivity::State deliveryState;
+                    deliveryState.phase = activity.phase;
+                    deliveryState.attention = activity.attention;
+                    if (!::TerminalApp::PaneActivity::ShouldDeliver(deliveryState, deliveryMode, tabImpl == focusedTab))
+                    {
+                        continue;
+                    }
+                    ++activeCount;
+                    if (activity.attention != ::TerminalApp::PaneActivity::Attention::None)
+                    {
+                        ++attentionCount;
+                    }
+                }
+            }
+        }
+
+        const auto hasActivity = activeCount != 0;
+        const auto hasAttention = attentionCount != 0;
+        _activityCenterIcon.Glyph(L"\xE823");
+        _activityCenterIcon.Opacity(hasActivity ? 1.0 : 0.65);
+
+        const auto accessibleName = hasAttention ?
+                                        fmt::format(L"Activity Center, {} need attention", attentionCount) :
+                                    hasActivity ?
+                                        fmt::format(L"Activity Center, {} active", activeCount) :
+                                        L"Activity Center, no activity";
+        WUX::Automation::AutomationProperties::SetName(_activityCenterButton, accessibleName);
+        WUX::Controls::ToolTipService::SetToolTip(_activityCenterButton, box_value(accessibleName));
     }
 
     // Handler for our WindowProperties's PropertyChanged event. We'll use this
