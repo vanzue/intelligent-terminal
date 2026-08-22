@@ -1335,6 +1335,7 @@ namespace winrt::TerminalApp::implementation
                         {
                             signal.kind = PaneActivity::SignalKind::ConnectionClosed;
                             signal.summary = RS_(L"NoticeError");
+                            signal.observed = tab->_IsPaneObserved(paneId);
                         }
                         else
                         {
@@ -1470,26 +1471,20 @@ namespace winrt::TerminalApp::implementation
                         {
                             signal.kind = PaneActivity::SignalKind::OperationStarted;
                             signal.operationKind = PaneActivity::OperationKind::Shell;
+                            if (const auto pane = tab->_rootPane ? tab->_rootPane->FindPane(paneId) : nullptr)
+                            {
+                                if (const auto control = pane->GetTerminalControl())
+                                {
+                                    signal.shellName = control.ShellName();
+                                }
+                            }
                         }
                         else if (value.starts_with(L"osc:133;D;"))
                         {
                             signal.kind = PaneActivity::SignalKind::OperationFinished;
                             constexpr std::wstring_view prefix{ L"osc:133;D;" };
-                            const auto codeText = value.substr(prefix.size());
-                            uint64_t parsedCode = 0;
-                            bool validCode = !codeText.empty();
-                            for (const auto ch : codeText)
-                            {
-                                if (ch < L'0' || ch > L'9' || parsedCode > (UINT32_MAX - (ch - L'0')) / 10)
-                                {
-                                    validCode = false;
-                                    break;
-                                }
-                                parsedCode = parsedCode * 10 + (ch - L'0');
-                            }
-                            signal.exitCode = validCode ? std::optional<uint32_t>{ static_cast<uint32_t>(parsedCode) } :
-                                                          std::optional<uint32_t>{ UINT32_MAX };
-                            signal.outcome = signal.exitCode == uint32_t{ 0 } ? PaneActivity::Outcome::Succeeded : PaneActivity::Outcome::Failed;
+                            signal.exitCode = PaneActivity::ParseExitCode(value.substr(prefix.size()));
+                            signal.outcome = signal.exitCode == int64_t{ 0 } ? PaneActivity::Outcome::Succeeded : PaneActivity::Outcome::Failed;
                             signal.observed = tab->_IsPaneObserved(paneId);
                             if (const auto pane = tab->_rootPane ? tab->_rootPane->FindPane(paneId) : nullptr)
                             {
@@ -1677,6 +1672,7 @@ namespace winrt::TerminalApp::implementation
             PaneActivity::Signal signal{ PaneActivity::SignalKind::OperationWaiting, PaneActivity::OperationKind::Agent };
             signal.operationId = operationId;
             signal.summary = summary;
+            signal.observed = _IsPaneObserved(paneId);
             _ApplyPaneActivitySignal(paneId, signal);
         }
         else if (phase == L"idle" && state->second.hasOperation && state->second.operationKind == PaneActivity::OperationKind::Agent)
@@ -1773,6 +1769,7 @@ namespace winrt::TerminalApp::implementation
                     .receivedSequence = state.receivedSequence,
                     .summary = state.summary,
                     .lastCommand = state.lastCommand,
+                    .shellName = state.shellName,
                     .lastExitCode = state.lastExitCode,
                 };
                 if (const auto pane = _rootPane ? _rootPane->FindPane(paneId) : nullptr)

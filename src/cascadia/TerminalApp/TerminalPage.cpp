@@ -517,8 +517,8 @@ namespace winrt::TerminalApp::implementation
         activityCenterContent.Height(20);
         _activityCenterIcon = WUX::Controls::FontIcon{};
         _activityCenterIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-        _activityCenterIcon.FontSize(12);
-        _activityCenterIcon.Glyph(L"\xE823");
+        _activityCenterIcon.FontSize(16);
+        _activityCenterIcon.Glyph(L"\xE8FD");
         _activityCenterIcon.HorizontalAlignment(WUX::HorizontalAlignment::Center);
         _activityCenterIcon.VerticalAlignment(WUX::VerticalAlignment::Center);
         activityCenterContent.Children().Append(_activityCenterIcon);
@@ -11162,10 +11162,6 @@ namespace winrt::TerminalApp::implementation
         };
 
         std::vector<Item> activities;
-        const auto focusedTab = _GetFocusedTabImpl();
-        const auto deliveryMode = _settings && _settings.GlobalSettings().ActivityCenterDelivery() == L"allActivity" ?
-                                      ::TerminalApp::PaneActivity::DeliveryMode::AllActivity :
-                                      ::TerminalApp::PaneActivity::DeliveryMode::AttentionOnly;
         for (const auto& tab : _tabs)
         {
             const auto tabImpl = _GetTabImpl(tab);
@@ -11175,13 +11171,6 @@ namespace winrt::TerminalApp::implementation
             }
             for (auto&& activity : tabImpl->ActivityEntries())
             {
-                ::TerminalApp::PaneActivity::State deliveryState;
-                deliveryState.phase = activity.phase;
-                deliveryState.attention = activity.attention;
-                if (!::TerminalApp::PaneActivity::ShouldDeliver(deliveryState, deliveryMode, tabImpl == focusedTab))
-                {
-                    continue;
-                }
                 activities.emplace_back(Item{
                     tabImpl->StableId(),
                     tabImpl->GetTabText(),
@@ -11237,8 +11226,27 @@ namespace winrt::TerminalApp::implementation
                                 item.activity.attention == ::TerminalApp::PaneActivity::Attention::Update              ? L"Completed" :
                                 item.activity.phase == ::TerminalApp::PaneActivity::Phase::Waiting                     ? L"Waiting" :
                                                                                                                          L"Working";
+            const auto shellSource = [&]() -> std::wstring {
+                if (item.activity.shellName == L"pwsh")
+                {
+                    return L"PowerShell";
+                }
+                if (item.activity.shellName == L"powershell")
+                {
+                    return L"Windows PowerShell";
+                }
+                if (item.activity.shellName == L"bash")
+                {
+                    return L"Bash";
+                }
+                if (item.activity.shellName.starts_with(L"wsl:"))
+                {
+                    return fmt::format(L"WSL ({})", std::wstring_view{ item.activity.shellName }.substr(4));
+                }
+                return item.activity.shellName.empty() ? L"Shell" : item.activity.shellName;
+            }();
             const auto source = item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Agent       ? L"Agent" :
-                                item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Shell       ? L"Shell" :
+                                item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Shell       ? shellSource.c_str() :
                                 item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Application ? L"Application" :
                                                                                                                          L"Terminal";
             auto detail = item.activity.summary;
@@ -11312,8 +11320,10 @@ namespace winrt::TerminalApp::implementation
                 item.activity.lastExitCode.has_value())
             {
                 WUX::Controls::TextBlock exitCode;
-                exitCode.Text(*item.activity.lastExitCode == UINT32_MAX ?
-                                  L"Exit code unavailable" :
+                const auto isPowerShellError = *item.activity.lastExitCode == -1 &&
+                                               (item.activity.shellName == L"pwsh" || item.activity.shellName == L"powershell");
+                exitCode.Text(isPowerShellError ?
+                                  L"PowerShell error" :
                                   fmt::format(L"Exit code {}", *item.activity.lastExitCode));
                 exitCode.FontSize(11);
                 exitCode.Opacity(0.65);
@@ -11406,25 +11416,15 @@ namespace winrt::TerminalApp::implementation
 
         uint32_t activeCount = 0;
         uint32_t attentionCount = 0;
-        const auto focusedTab = _GetFocusedTabImpl();
-        const auto deliveryMode = _settings && _settings.GlobalSettings().ActivityCenterDelivery() == L"allActivity" ?
-                                      ::TerminalApp::PaneActivity::DeliveryMode::AllActivity :
-                                      ::TerminalApp::PaneActivity::DeliveryMode::AttentionOnly;
         for (const auto& tab : _tabs)
         {
             if (const auto tabImpl = _GetTabImpl(tab))
             {
                 for (const auto& activity : tabImpl->ActivityEntries())
                 {
-                    ::TerminalApp::PaneActivity::State deliveryState;
-                    deliveryState.phase = activity.phase;
-                    deliveryState.attention = activity.attention;
-                    if (!::TerminalApp::PaneActivity::ShouldDeliver(deliveryState, deliveryMode, tabImpl == focusedTab))
-                    {
-                        continue;
-                    }
                     ++activeCount;
-                    if (activity.attention != ::TerminalApp::PaneActivity::Attention::None)
+                    if (activity.attention == ::TerminalApp::PaneActivity::Attention::Error ||
+                        activity.attention == ::TerminalApp::PaneActivity::Attention::ActionRequired)
                     {
                         ++attentionCount;
                     }
@@ -11434,8 +11434,24 @@ namespace winrt::TerminalApp::implementation
 
         const auto hasActivity = activeCount != 0;
         const auto hasAttention = attentionCount != 0;
-        _activityCenterIcon.Glyph(L"\xE823");
+        _activityCenterIcon.Glyph(L"\xE8FD");
         _activityCenterIcon.Opacity(hasActivity ? 1.0 : 0.65);
+
+        const auto resources = WUX::Application::Current().Resources();
+        const auto brushKey = winrt::box_value(L"TextFillColorPrimaryBrush");
+        if (hasAttention)
+        {
+            _activityCenterIcon.Foreground(WUX::Media::SolidColorBrush{
+                Windows::UI::ColorHelper::FromArgb(255, 0xFF, 0xD7, 0x00) });
+        }
+        else if (resources.HasKey(brushKey))
+        {
+            const auto resource = ThemeLookup(resources, _tabRow.ActualTheme(), brushKey);
+            if (const auto brush = resource.try_as<WUX::Media::Brush>())
+            {
+                _activityCenterIcon.Foreground(brush);
+            }
+        }
 
         const auto accessibleName = hasAttention ?
                                         fmt::format(L"Activity Center, {} need attention", attentionCount) :

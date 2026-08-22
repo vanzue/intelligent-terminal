@@ -642,17 +642,16 @@ ActionRequired > Error > Update > Working
 ```
 
 The tab-row Activity Center entry remains available in the empty state and
-always uses the monochrome Segoe Fluent `Recent` glyph. It changes only from
-subdued to normal opacity when a deliverable entry exists. It does not use
-color, a numeric badge, or a notification glyph.
+always uses the Segoe Fluent `BulletedList` glyph. Its foreground is neutral
+when empty, uses the theme's primary tab-title foreground for routine `Working`
+or `Update` activity, and uses the same gold as the Autofix detected/review
+state when any entry is `Error` or `ActionRequired`. The icon projects the
+highest level across all panes and does not use a numeric badge or notification
+glyph.
 
-Delivery is a projection over pane state, not a separate state store. The
-currently active tab never contributes entries. The global
-`activityCenterDelivery` setting accepts `attentionOnly` (the default) or
-`allActivity`. `attentionOnly` delivers only `Error` and `ActionRequired`;
-routine `Working` and completed `Update` states remain available to tab-local
-status but do not enter Activity Center. `allActivity` includes every
-non-idle/current-attention entry from inactive tabs.
+Activity Center projects every non-idle or attention-bearing pane state,
+including panes in the active tab. Attention is disarmed only when its exact
+source pane is focused; focusing the tab or a sibling pane does not clear it.
 
 Each tab assigns a monotonically increasing receive sequence to every pane
 activity signal. When panes have the same attention and phase priority, the

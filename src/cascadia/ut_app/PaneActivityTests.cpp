@@ -16,7 +16,8 @@ namespace TerminalAppUnitTests
         TEST_METHOD(ReducerPreservesAttentionSemantics);
         TEST_METHOD(AggregationSelectsHighestPriorityPane);
         TEST_METHOD(ObservationRequiresFocusedSourcePane);
-        TEST_METHOD(DeliveryPolicyFiltersActiveTabAndRoutineActivity);
+        TEST_METHOD(FocusedPaneObservationDisarmsAttention);
+        TEST_METHOD(ParsesSignedShellExitCodes);
     };
 
     void PaneActivityTests::ReducerPreservesAttentionSemantics()
@@ -27,9 +28,12 @@ namespace TerminalAppUnitTests
         ApplySignal(state, { SignalKind::ConnectionReady });
         VERIFY_ARE_EQUAL(static_cast<int>(Phase::Idle), static_cast<int>(state.phase));
 
-        ApplySignal(state, { SignalKind::OperationStarted, OperationKind::Shell });
+        Signal started{ SignalKind::OperationStarted, OperationKind::Shell };
+        started.shellName = L"pwsh";
+        ApplySignal(state, started);
         VERIFY_ARE_EQUAL(static_cast<int>(Phase::Working), static_cast<int>(state.phase));
         VERIFY_IS_TRUE(state.hasOperation);
+        VERIFY_ARE_EQUAL(L"pwsh", state.shellName);
 
         Signal finished{ SignalKind::OperationFinished };
         finished.outcome = Outcome::Succeeded;
@@ -39,8 +43,9 @@ namespace TerminalAppUnitTests
 
         ApplySignal(state, { SignalKind::Observed });
         ApplySignal(state, { SignalKind::OperationWaiting, OperationKind::Agent });
-        ApplySignal(state, { SignalKind::Observed });
         VERIFY_ARE_EQUAL(static_cast<int>(Attention::ActionRequired), static_cast<int>(state.attention));
+        ApplySignal(state, { SignalKind::Observed });
+        VERIFY_ARE_EQUAL(static_cast<int>(Attention::None), static_cast<int>(state.attention));
 
         ApplySignal(state, { SignalKind::OperationResumed, OperationKind::Agent });
         VERIFY_ARE_EQUAL(static_cast<int>(Phase::Working), static_cast<int>(state.phase));
@@ -53,7 +58,7 @@ namespace TerminalAppUnitTests
         VERIFY_ARE_EQUAL(static_cast<int>(Attention::Error), static_cast<int>(state.attention));
         VERIFY_ARE_EQUAL(L"cargo test", state.lastCommand);
         VERIFY_IS_TRUE(state.lastExitCode.has_value());
-        VERIFY_ARE_EQUAL(101u, *state.lastExitCode);
+        VERIFY_ARE_EQUAL(int64_t{ 101 }, *state.lastExitCode);
 
         ApplySignal(state, { SignalKind::Observed });
         ApplySignal(state, { SignalKind::OperationStarted, OperationKind::Agent });
@@ -62,6 +67,19 @@ namespace TerminalAppUnitTests
         finished.outcome = Outcome::Cancelled;
         ApplySignal(state, finished);
         VERIFY_ARE_EQUAL(static_cast<int>(Attention::None), static_cast<int>(state.attention));
+    }
+
+    void PaneActivityTests::ParsesSignedShellExitCodes()
+    {
+        using namespace TerminalApp::PaneActivity;
+
+        VERIFY_ARE_EQUAL(int64_t{ 0 }, *ParseExitCode(L"0"));
+        VERIFY_ARE_EQUAL(int64_t{ 101 }, *ParseExitCode(L"101"));
+        VERIFY_ARE_EQUAL(int64_t{ -1 }, *ParseExitCode(L"-1"));
+        VERIFY_ARE_EQUAL(int64_t{ UINT32_MAX }, *ParseExitCode(L"4294967295"));
+        VERIFY_IS_FALSE(ParseExitCode(L"").has_value());
+        VERIFY_IS_FALSE(ParseExitCode(L"unknown").has_value());
+        VERIFY_IS_FALSE(ParseExitCode(L"4294967296").has_value());
     }
 
     void PaneActivityTests::AggregationSelectsHighestPriorityPane()
@@ -123,29 +141,28 @@ namespace TerminalAppUnitTests
         VERIFY_IS_FALSE(IsPaneObserved(true, 2, std::nullopt, false));
     }
 
-    void PaneActivityTests::DeliveryPolicyFiltersActiveTabAndRoutineActivity()
+    void PaneActivityTests::FocusedPaneObservationDisarmsAttention()
     {
         using namespace TerminalApp::PaneActivity;
 
-        State working;
-        working.phase = Phase::Working;
-        VERIFY_IS_FALSE(ShouldDeliver(working, DeliveryMode::AttentionOnly, false));
-        VERIFY_IS_TRUE(ShouldDeliver(working, DeliveryMode::AllActivity, false));
+        State state;
+        ApplySignal(state, { SignalKind::OperationStarted, OperationKind::Agent });
 
-        State completed;
-        completed.attention = Attention::Update;
-        VERIFY_IS_FALSE(ShouldDeliver(completed, DeliveryMode::AttentionOnly, false));
-        VERIFY_IS_TRUE(ShouldDeliver(completed, DeliveryMode::AllActivity, false));
+        Signal waiting{ SignalKind::OperationWaiting, OperationKind::Agent };
+        waiting.observed = true;
+        ApplySignal(state, waiting);
+        VERIFY_ARE_EQUAL(static_cast<int>(Attention::None), static_cast<int>(state.attention));
 
-        State failed;
-        failed.attention = Attention::Error;
-        VERIFY_IS_TRUE(ShouldDeliver(failed, DeliveryMode::AttentionOnly, false));
-        VERIFY_IS_FALSE(ShouldDeliver(failed, DeliveryMode::AttentionOnly, true));
+        Signal failed{ SignalKind::OperationFinished, OperationKind::Agent };
+        failed.outcome = Outcome::Failed;
+        failed.observed = true;
+        ApplySignal(state, failed);
+        VERIFY_ARE_EQUAL(static_cast<int>(Attention::None), static_cast<int>(state.attention));
 
-        State waiting;
-        waiting.phase = Phase::Waiting;
-        waiting.attention = Attention::ActionRequired;
-        VERIFY_IS_TRUE(ShouldDeliver(waiting, DeliveryMode::AttentionOnly, false));
-        VERIFY_IS_FALSE(ShouldDeliver(waiting, DeliveryMode::AllActivity, true));
+        waiting.observed = false;
+        ApplySignal(state, waiting);
+        VERIFY_ARE_EQUAL(static_cast<int>(Attention::ActionRequired), static_cast<int>(state.attention));
+        ApplySignal(state, { SignalKind::Observed });
+        VERIFY_ARE_EQUAL(static_cast<int>(Attention::None), static_cast<int>(state.attention));
     }
 }

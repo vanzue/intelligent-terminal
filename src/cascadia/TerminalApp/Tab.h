@@ -30,7 +30,8 @@ namespace winrt::TerminalApp::implementation
         bool hidden{ false };
         std::wstring summary;
         std::wstring lastCommand;
-        std::optional<uint32_t> lastExitCode;
+        std::wstring shellName;
+        std::optional<int64_t> lastExitCode;
         std::wstring paneTitle;
         std::wstring workingDirectory;
     };

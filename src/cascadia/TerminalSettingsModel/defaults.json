@@ -37,7 +37,6 @@
 
     // Agent Integration
     "agentPanePosition": "bottom",
-    "activityCenterDelivery": "attentionOnly",
 
     "profiles":
     [

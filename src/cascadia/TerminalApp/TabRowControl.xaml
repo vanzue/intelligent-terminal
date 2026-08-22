@@ -99,7 +99,7 @@
                         VerticalAlignment="Bottom"
                         Background="{ThemeResource CardStrokeColorDefaultBrush}" />
 
-                <!--  E823 is the "TimelineProgress" glyph.  -->
+                <!--  E8FD is the Fluent "BulletedList" glyph.  -->
                 <Button x:Name="ActivityCenterButton"
                         Grid.Column="0"
                         Width="31"
@@ -110,9 +110,9 @@
                         AutomationProperties.AccessibilityView="Control"
                         Background="Transparent"
                         BorderThickness="0"
-                        Content="&#xE823;"
+                        Content="&#xE8FD;"
                         FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                        FontSize="12" />
+                        FontSize="16" />
 
                 <mux:SplitButton x:Name="NewTabButton"
                                  Grid.Column="1"

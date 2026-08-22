@@ -58,12 +58,6 @@ namespace TerminalApp::PaneActivity
         Paused,
     };
 
-    enum class DeliveryMode
-    {
-        AttentionOnly,
-        AllActivity,
-    };
-
     enum class SignalKind
     {
         ConnectionReady,
@@ -90,7 +84,8 @@ namespace TerminalApp::PaneActivity
         bool observed{ false };
         std::wstring summary;
         std::wstring command;
-        std::optional<uint32_t> exitCode;
+        std::wstring shellName;
+        std::optional<int64_t> exitCode;
     };
 
     struct State
@@ -110,7 +105,8 @@ namespace TerminalApp::PaneActivity
         bool hasOperation{ false };
         std::wstring summary;
         std::wstring lastCommand;
-        std::optional<uint32_t> lastExitCode;
+        std::wstring shellName;
+        std::optional<int64_t> lastExitCode;
     };
 
     struct PaneState
@@ -165,20 +161,35 @@ namespace TerminalApp::PaneActivity
         return tabFocused && !hidden && activePaneId.has_value() && *activePaneId == paneId;
     }
 
-    constexpr bool ShouldDeliver(const State& state, const DeliveryMode mode, const bool activeTab) noexcept
+    inline std::optional<int64_t> ParseExitCode(const std::wstring_view text) noexcept
     {
-        if (activeTab)
+        if (text.empty())
         {
-            return false;
+            return std::nullopt;
         }
-        if (mode == DeliveryMode::AllActivity)
+
+        const auto negative = text.front() == L'-';
+        const auto digits = negative ? text.substr(1) : text;
+        if (digits.empty())
         {
-            return state.phase == Phase::Working ||
-                   state.phase == Phase::Waiting ||
-                   state.attention != Attention::None;
+            return std::nullopt;
         }
-        return state.attention == Attention::Error ||
-               state.attention == Attention::ActionRequired;
+
+        constexpr uint64_t maxPositive = UINT32_MAX;
+        constexpr uint64_t maxNegativeMagnitude = static_cast<uint64_t>(INT32_MAX) + 1;
+        const auto limit = negative ? maxNegativeMagnitude : maxPositive;
+        uint64_t value = 0;
+        for (const auto ch : digits)
+        {
+            const auto digit = static_cast<uint64_t>(ch - L'0');
+            if (ch < L'0' || ch > L'9' || value > (limit - digit) / 10)
+            {
+                return std::nullopt;
+            }
+            value = value * 10 + digit;
+        }
+
+        return negative ? -static_cast<int64_t>(value) : static_cast<int64_t>(value);
     }
 
     inline void ApplySignal(State& state, const Signal& signal)
@@ -213,7 +224,14 @@ namespace TerminalApp::PaneActivity
             state.progressState = ProgressState::None;
             state.lastOutcome = Outcome::Interrupted;
             state.summary = signal.summary;
-            setAttention(Attention::Error);
+            if (!signal.observed)
+            {
+                setAttention(Attention::Error);
+            }
+            else
+            {
+                state.attention = Attention::None;
+            }
             break;
         case SignalKind::PromptStarted:
             if (state.hasOperation && state.operationKind == OperationKind::Shell)
@@ -242,6 +260,7 @@ namespace TerminalApp::PaneActivity
             state.summary = signal.summary;
             state.lastCommand.clear();
             state.lastExitCode.reset();
+            state.shellName = signal.shellName;
             state.attention = Attention::None;
             break;
         case SignalKind::OperationWaiting:
@@ -251,7 +270,14 @@ namespace TerminalApp::PaneActivity
             state.operationId = signal.operationId == 0 ? state.operationId : signal.operationId;
             state.hasOperation = true;
             state.summary = signal.summary;
-            setAttention(Attention::ActionRequired);
+            if (!signal.observed)
+            {
+                setAttention(Attention::ActionRequired);
+            }
+            else
+            {
+                state.attention = Attention::None;
+            }
             break;
         case SignalKind::OperationResumed:
             if (state.hasOperation)
@@ -271,7 +297,7 @@ namespace TerminalApp::PaneActivity
                 state.summary = signal.summary;
                 state.lastCommand = signal.command;
                 state.lastExitCode = signal.exitCode;
-                if (signal.outcome == Outcome::Failed)
+                if (signal.outcome == Outcome::Failed && !signal.observed)
                 {
                     setAttention(Attention::Error);
                 }
@@ -318,10 +344,7 @@ namespace TerminalApp::PaneActivity
             }
             break;
         case SignalKind::Observed:
-            if (state.attention == Attention::Update || state.attention == Attention::Error)
-            {
-                state.attention = Attention::None;
-            }
+            state.attention = Attention::None;
             break;
         }
     }
