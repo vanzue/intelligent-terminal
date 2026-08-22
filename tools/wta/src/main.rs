@@ -22,6 +22,9 @@ mod event;
 mod helper;
 mod history_loader;
 #[cfg(test)]
+#[path = "hook_contract_tests.rs"]
+mod hook_contract_tests;
+#[cfg(test)]
 #[path = "locale_parity_tests.rs"]
 mod locale_parity_tests;
 mod logging;
@@ -46,8 +49,6 @@ mod ui;
 mod ui_trace;
 mod usage;
 mod win32;
-mod wsl;
-mod wsl_acp;
 mod wt_protocol_events;
 
 use anyhow::Result;
@@ -132,7 +133,6 @@ fn helper_config(cli: Cli) -> helper::config::HelperConfig {
         initial_load_session_id: cli.initial_load_session_id,
         initial_load_cwd: cli.initial_load_cwd,
         start_stashed: cli.start_stashed,
-        assume_master_down: cli.assume_master_down,
     }
 }
 
@@ -223,8 +223,7 @@ fn process_label(cli: &Cli) -> String {
         Some(Command::ProbeModels { .. })
         | Some(Command::ProbeAgentSources { .. })
         | Some(Command::ProbeSessions { .. })
-        | Some(Command::ProbeHostSessions { .. })
-        | Some(Command::ProbeWslSessions { .. }) => "probe".to_string(),
+        | Some(Command::ProbeHostSessions { .. }) => "probe".to_string(),
         Some(Command::Hooks {
             action: HooksAction::Install { .. },
         }) => "install-hooks".to_string(),

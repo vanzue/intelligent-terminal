@@ -45,6 +45,17 @@ pub enum AppEvent {
         available_models: Vec<AcpModelInfo>,
         current_model_id: Option<String>,
     },
+    ModelSetCompleted {
+        session_id: String,
+        model: String,
+        pane_override: bool,
+    },
+    ModelSetFailed {
+        session_id: String,
+        model: String,
+        pane_override: bool,
+        message: String,
+    },
     SessionConfigUpdated {
         session_id: String,
         options: Vec<AcpSessionConfigOption>,
@@ -91,6 +102,9 @@ pub enum AppEvent {
         failure: crate::protocol::acp::failure::AgentFailure,
         message: String,
     },
+    /// The helper's pipe to wta-master closed. The helper exits instead of
+    /// remaining degraded or attempting automatic session recovery.
+    MasterDisconnected,
     AgentSoftStop {
         session_id: String,
         reason: crate::protocol::acp::soft_stop::SoftStopReason,

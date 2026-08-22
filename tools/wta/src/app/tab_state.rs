@@ -133,7 +133,7 @@ pub enum ChatMessage {
     /// codes, OSC sequences). Distinct from `Error` so we can theme it
     /// differently and skip autofix wiring.
     AgentEvent(String),
-    /// "Intelligent Terminal uses AI. Check for mistakes" disclaimer.
+    /// "Intelligent Terminal uses AI." disclaimer.
     /// Pushed on every agent-pane startup,
     /// no persistence gating — getting cleared by the next turn is fine,
     /// the next pane startup re-pushes it.
@@ -536,6 +536,11 @@ pub struct TabSession {
 }
 
 impl TabSession {
+    pub(crate) fn invalidate_pending_paste(&mut self) {
+        self.paste_pending = false;
+        self.paste_generation = self.paste_generation.wrapping_add(1);
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         self.chat_scroll.offset = 0;
     }
@@ -618,8 +623,7 @@ impl TabSession {
         self.attachments
             .remove_tokens_from_input(&mut self.input, &mut self.cursor_pos);
         self.clear_history_draft_attachments();
-        self.paste_pending = false;
-        self.paste_generation = self.paste_generation.wrapping_add(1);
+        self.invalidate_pending_paste();
     }
 
     pub fn flush_load_replay_pending(&mut self) {

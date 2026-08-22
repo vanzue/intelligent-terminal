@@ -69,33 +69,91 @@ impl App {
         tab.completed_turn_selection_visible_pending = click.previous_selection_pending;
     }
 
+    fn copy_text_selection(&mut self) -> bool {
+        let Some(text) = self.text_selection.selected_text() else {
+            return false;
+        };
+        match crate::win32::copy_text_to_clipboard(&text) {
+            Ok(()) => {
+                self.text_selection.clear();
+                self.close_pane_armed_at = None;
+                self.transient_hint = Some((
+                    t!("system.selection_copied").into_owned(),
+                    std::time::Instant::now() + SELECTION_COPIED_HINT_WINDOW,
+                ));
+            }
+            Err(error) => {
+                self.transient_hint = None;
+                tracing::warn!(
+                    target: "clipboard",
+                    error = %error,
+                    "failed to copy mouse-selected text"
+                );
+            }
+        }
+        true
+    }
+
+    pub(super) fn default_paste_request_for_current_tab(&self) -> Option<String> {
+        let tab = self.current_tab();
+        if self.mode != AppMode::Chat
+            || tab.current_view != View::Chat
+            || !tab.pane_open
+            || !tab.input_can_receive_nav_focus()
+            || self.help_overlay_visible
+            || self.command_popup_visible()
+        {
+            return None;
+        }
+        Some(
+            serde_json::json!({
+                "type": "event",
+                "method": "request_default_paste",
+                "params": {
+                    "window_id": self.window_id.as_deref()?,
+                    "tab_id": self.tab_id.as_deref()?,
+                    "pane_id": self.pane_id.as_deref()?,
+                }
+            })
+            .to_string(),
+        )
+    }
+
+    pub(super) fn handle_right_click(&mut self) -> Option<String> {
+        self.cancel_completed_turn_click();
+        if self.copy_text_selection() {
+            return None;
+        }
+        let Some(request) = self.default_paste_request_for_current_tab() else {
+            let tab = self.current_tab();
+            tracing::debug!(
+                target: "agent_paste",
+                mode = ?self.mode,
+                view = ?tab.current_view,
+                pane_open = tab.pane_open,
+                input_can_receive_focus = tab.input_can_receive_nav_focus(),
+                help_overlay_visible = self.help_overlay_visible,
+                command_popup_visible = self.command_popup_visible(),
+                window_id = ?self.window_id,
+                tab_id = ?self.tab_id,
+                pane_id = ?self.pane_id,
+                "right-click Default Paste request was gated"
+            );
+            return None;
+        };
+        self.current_tab_mut().clear_completed_turn_selection();
+        tracing::debug!(target: "agent_paste", "publishing right-click Default Paste request");
+        Some(request)
+    }
+
     pub(super) fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => {
                 self.cancel_completed_turn_click();
                 let is_copy = matches!(key.code, KeyCode::Char('c'))
                     && key.modifiers.contains(KeyModifiers::CONTROL);
-                if is_copy {
-                    if let Some(text) = self.text_selection.selected_text() {
-                        match crate::win32::copy_text_to_clipboard(&text) {
-                            Ok(()) => {
-                                self.text_selection.clear();
-                                self.close_pane_armed_at = None;
-                                self.transient_hint = Some((
-                                    t!("system.selection_copied").into_owned(),
-                                    std::time::Instant::now() + SELECTION_COPIED_HINT_WINDOW,
-                                ));
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "clipboard",
-                                    error = %error,
-                                    "failed to copy mouse-selected text"
-                                );
-                            }
-                        }
-                        return;
-                    }
+                if is_copy && self.copy_text_selection() {
+                    return;
                 }
                 self.text_selection.clear();
                 self.handle_key(key);
@@ -134,6 +192,11 @@ impl App {
                             self.current_tab_mut().chat_scroll.by(-lines);
                         }
                         _ => {}
+                    }
+                }
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+                    if let Some(request) = self.handle_right_click() {
+                        send_wt_protocol_event(request);
                     }
                 }
                 crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -186,7 +249,8 @@ impl App {
                         let previous_selected_index = tab.selected_completed_turn_idx;
                         let previous_selection_pending =
                             tab.completed_turn_selection_visible_pending;
-                        let previous_expanded = tab.completed_turns[pressed.hit.turn_index].expanded;
+                        let previous_expanded =
+                            tab.completed_turns[pressed.hit.turn_index].expanded;
                         if tab.select_completed_turn(pressed.hit.turn_index)
                             && tab.toggle_completed_turn(pressed.hit.turn_index)
                             && pressed.hit.kind == CompletedTurnHitKind::UserInput
@@ -329,9 +393,6 @@ impl App {
                 // bump the generation so a still-pending dead-man timer becomes
                 // stale and can't later force the sign-in screen.
                 self.auth_recovery_generation = self.auth_recovery_generation.wrapping_add(1);
-                // A live connection cancels the degraded latch (e.g. the
-                // post-sign-in reconnect that goes back through master).
-                self.transport_lost = false;
                 self.proposal_channels.set_agent_transport_available(true);
                 self.preflight_setup_active = false;
                 // If we were in Setup (e.g. after Retry), transition to Chat
@@ -447,7 +508,7 @@ impl App {
                 // already model-applied by the client at startup.
                 if !is_load_target {
                     if let Some(model) = self.effective_model_for_tab(&tab_id) {
-                        self.send_session_model(Some(session_id.clone()), model);
+                        self.send_session_model(Some(session_id.clone()), model, false);
                     }
                 }
                 self.publish_agent_status();
@@ -489,6 +550,59 @@ impl App {
                     self.publish_agent_status();
                 }
             }
+            AppEvent::ModelSetCompleted {
+                session_id,
+                model,
+                pane_override,
+            } => {
+                let target_tab = self.bound_tab_for_session(&session_id);
+                let Some(target_tab) = target_tab else {
+                    return;
+                };
+                if let Some((_, current_model_id)) =
+                    self.session_model_configs.get_mut(&session_id)
+                {
+                    *current_model_id = Some(model.clone());
+                }
+                if pane_override {
+                    let name = self.model_display_name(&model);
+                    let tab = self.tab_mut(&target_tab);
+                    tab.model_override = Some(model.clone());
+                    tab.messages.push(ChatMessage::success(
+                        t!("system.model_set", model = name.as_str()).into_owned(),
+                    ));
+                    tab.scroll_to_bottom();
+                }
+                if self.current_tab().session_id.as_deref() == Some(session_id.as_str()) {
+                    self.agent_current_model_id = Some(model);
+                    self.rebuild_model_catalog_from_agent_state();
+                    self.publish_agent_status();
+                }
+            }
+            AppEvent::ModelSetFailed {
+                session_id,
+                model,
+                pane_override,
+                message,
+            } => {
+                let target_tab = self.bound_tab_for_session(&session_id);
+                let Some(target_tab) = target_tab else {
+                    return;
+                };
+                if pane_override {
+                    let name = self.model_display_name(&model);
+                    let tab = self.tab_mut(&target_tab);
+                    tab.messages.push(ChatMessage::error(
+                        t!(
+                            "system.config_update_failed",
+                            option = name.as_str(),
+                            error = message.as_str()
+                        )
+                        .into_owned(),
+                    ));
+                    tab.scroll_to_bottom();
+                }
+            }
             AppEvent::SessionConfigUpdated {
                 session_id,
                 options,
@@ -524,10 +638,7 @@ impl App {
                     .and_then(|options| options.iter_mut().find(|option| option.id == config_id))
                     .map(|option| {
                         option.current_value = value.clone();
-                        (
-                            option.name.clone(),
-                            option.current_value_name().to_string(),
-                        )
+                        (option.name.clone(), option.current_value_name().to_string())
                     })
                     .unwrap_or_else(|| (config_id.clone(), value.clone()));
                 let target_tab = self.bound_tab_for_session(&session_id);
@@ -667,35 +778,6 @@ impl App {
                     crate::protocol::acp::failure::AgentFailure::Protocol { .. }
                 );
 
-                // The transport to master is gone — latch the degraded state
-                // so the slash-command popup greys out everything but
-                // /restart (the only command that can recover without the
-                // dead pipe). Cleared on the next Connected.
-                let transport_lost = matches!(
-                    &failure,
-                    crate::protocol::acp::failure::AgentFailure::TransportLost
-                );
-                let stale_usage_tab = if transport_lost {
-                    self.transport_lost = true;
-                    self.proposal_channels.set_agent_transport_available(false);
-                    let target_tab = session_id
-                        .as_deref()
-                        .map(|sid| self.tab_for_session(sid))
-                        .unwrap_or_else(|| self.active_tab_key().to_string());
-                    let tab = self.tab_mut(&target_tab);
-                    if let Some(snapshot) = tab.usage.as_ref() {
-                        tab.usage_staleness.mark_present_stale(snapshot);
-                        Some(target_tab)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some(target_tab) = stale_usage_tab {
-                    self.project_tab_state(&target_tab);
-                }
-
                 let is_auth_error = failure.is_auth();
                 if is_auth_error && !self.preflight_setup_active {
                     tracing::info!("AgentError auth fallback: showing setup screen");
@@ -772,16 +854,8 @@ impl App {
                         tab.activity_outcome = Some(AgentActivityOutcome::Failed);
                     }
                     tab.turn = TurnState::Idle;
-                    // Suppress only an *identical* consecutive error, not any
-                    // trailing error. When the master/agent dies, two errors can
-                    // arrive: the raw transport error (returned as-is) and the
-                    // `handle_io` watchdog's connection.lost ("/restart") line.
-                    // Those are different messages and BOTH should show — the raw
-                    // one says what broke, the connection.lost one says how to
-                    // recover. Collapsing every consecutive error (the previous
-                    // behavior) could hide the /restart hint behind an unrelated
-                    // or in-flight error. Dedup only true duplicates so the same
-                    // line never stacks.
+                    // Suppress only an identical consecutive error so repeated
+                    // provider failures do not stack duplicate messages.
                     let is_duplicate = matches!(
                         tab.messages.last(),
                         Some(ChatMessage::Error(prev)) if prev == &message
@@ -790,6 +864,13 @@ impl App {
                         tab.messages.push(ChatMessage::Error(message));
                     }
                 }
+            }
+            AppEvent::MasterDisconnected => {
+                tracing::warn!(
+                    target: "helper",
+                    "master disconnected; terminating helper without session recovery"
+                );
+                self.should_quit = true;
             }
             AppEvent::PostLoginAuthRecovery {
                 failure,
@@ -1628,7 +1709,7 @@ impl App {
                         if let Some(target_agent_id) =
                             params.get("target_agent_id").and_then(|v| v.as_str())
                         {
-                        tracing::info!(
+                            tracing::info!(
                             target: "autofix",
                             model = raw,
                                 target_agent_id,
@@ -1658,10 +1739,10 @@ impl App {
                                 Ok(models) => self.set_cloud_models(models),
                                 Err(error) => {
                                     tracing::error!(
-                                        target: "cloud_models",
-                                        %error,
-                                        "invalid cloud model catalog in agent_config_changed"
-                        );
+                                                    target: "cloud_models",
+                                                    %error,
+                                                    "invalid cloud model catalog in agent_config_changed"
+                                    );
                                     return;
                                 }
                             }
@@ -1777,11 +1858,20 @@ impl App {
                         && !our_window.is_empty()
                         && target_window != our_window
                     {
+                        // Do not mutate this helper's per-window tab state,
+                        // but still notify master. If every helper in the
+                        // owning window exits during teardown, a helper in a
+                        // surviving window is the only process left that can
+                        // deliver the stable tab id needed to close the ACP
+                        // session. Master de-duplicates these requests.
+                        if let Some(closed_tab_id) = params.get("tab_id").and_then(|v| v.as_str()) {
+                            self.request_tab_session_close(closed_tab_id);
+                        }
                         tracing::debug!(
                             target: "tab_session",
                             target_window,
                             our_window,
-                            "ignoring tab_closed for different window"
+                            "forwarded cross-window tab_closed without mutating local state"
                         );
                         return;
                     }
@@ -2066,7 +2156,11 @@ impl App {
                             pane_open = open,
                             "applying pane_open"
                         );
-                        self.tab_mut(&target_tab).pane_open = open;
+                        let tab = self.tab_mut(&target_tab);
+                        if !open {
+                            tab.invalidate_pending_paste();
+                        }
+                        tab.pane_open = open;
                         // If a result is waiting for review on this tab,
                         // re-project the bar: opening the pane makes the
                         // result visible (→ Idle, bar goes quiet), closing

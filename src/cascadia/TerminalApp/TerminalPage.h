@@ -4,6 +4,9 @@
 #pragma once
 
 #include <ThrottledFunc.h>
+#include <functional>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "TerminalPage.g.h"
 #include "Tab.h"
@@ -17,6 +20,7 @@
 #include "WindowListEntry.g.h"
 #include "WindowListRequest.g.h"
 #include "Toast.h"
+#include "SharedWta.h"
 
 #include "WindowsPackageManagerFactory.h"
 #include "../inc/CustomModelProviderUtils.h"
@@ -255,11 +259,12 @@ namespace winrt::TerminalApp::implementation
         void OnAgentStatusChanged(hstring eventJson);
         void OnAgentSwitchRequested(hstring eventJson);
         void OnCloseAgentPaneRequested(hstring eventJson);
+        void OnDefaultPasteRequested(hstring eventJson);
         void OnAgentStateChanged(hstring eventJson);
         void OnResumeInNewAgentTabRequested(hstring eventJson);
         void OnAgentChipTargetChanged(hstring eventJson);
         void OnRestartAgentStackRequested(hstring eventJson);
-        void OnAgentPaneRestartRequested(hstring eventJson);
+        void OnAgentSessionsRetired(hstring eventJson);
 
         til::property_changed_event PropertyChanged;
 
@@ -445,6 +450,9 @@ namespace winrt::TerminalApp::implementation
         };
         AgentSettingsSnapshot _lastAgentSettings{};
         bool _agentSettingsSnapshotInitialized{ false };
+        std::string _settingsReloadRequestId;
+        std::optional<std::string> _pendingAgentRebuildRequestId;
+        static std::string _AgentSettingsRequestIdentity(const AgentSettingsSnapshot& snapshot);
         // Hot-updatable runtime agent config. When any of these change we
         // push a single consolidated `agent_config_changed` event to the
         // running wta-helper(s) so they update in place — no agent-pane
@@ -484,21 +492,42 @@ namespace winrt::TerminalApp::implementation
         std::atomic<bool> _shellIntegrationDesiredEnabled{ false };
         std::mutex _shellIntegrationReconcileMutex;
         bool _agentRebuilding{ false };
+        details::CoalescedRequest _pendingAgentStackRestart;
+        struct _PendingAgentRetirement
+        {
+            std::function<void(std::string_view)> continuation;
+            std::string reason;
+        };
+        std::unordered_map<std::string, _PendingAgentRetirement> _pendingAgentRetirements;
+        details::TabRetirementTracker _agentTabRetirements;
         // Set when a settings change wants a rebuild but the active
         // tab can't host an agent pane (e.g. the Settings tab itself).
         // _FlushPendingAgentRebuild runs the deferred rebuild from
         // _OnTabSelectionChanged once a terminal tab is active.
         bool _pendingAgentRebuild{ false };
 
-        // Short-lived marks keyed by tab StableId: set whenever an agent
-        // pane is torn down deliberately (Ctrl+C×2, settings rebuild,
-        // /restart, recovery re-warm). `OnAgentPaneRestartRequested`
-        // consumes a mark to skip respawning a pane the user/we just
-        // closed — the master's `restart_agent_pane` event fires for both
-        // deliberate teardown and genuine crash, so this is how C++
-        // distinguishes them. Entries are consumed on read and otherwise
-        // expire after a few seconds.
-        std::unordered_map<winrt::hstring, std::chrono::steady_clock::time_point> _agentPaneRestartSuppression;
+        // Plan-C resume-into-new-tab bookkeeping. When the session
+        // manager's Enter handler on a Historical/Ended row creates a
+        // new tab, it stashes the requested session id + cwd here keyed
+        // by the new tab's StableId. `OnAgentStateChanged` consumes the
+        // entry the moment it spawns the new helper for that tab —
+        // passing the values down as `--initial-load-session-id` +
+        // `--initial-load-cwd` so the boot-time ACP `session/load` is
+        // atomic with helper spawn. Replaces the prior race-prone
+        // "spawn helper, then broadcast `load_session` VT event" path
+        // (the VT broadcast often landed in the wrong helper because
+        // every helper subscribed to the same shared COM event stream).
+        //
+        // Entries are one-shot; an unconsumed entry leaks until the
+        // page is torn down (only happens if the user closes the new
+        // tab before its `agent_state_changed{pane_open:true}` round-
+        // trips back from wta). Tiny worst-case memory cost.
+        struct _PendingLoadSession
+        {
+            std::string sessionId;
+            std::string cwd;
+        };
+        std::unordered_map<winrt::hstring, _PendingLoadSession> _pendingLoadSessions;
         AgentSettingsSnapshot _CaptureAgentSettingsSnapshot() const;
         // Compares only agent-CLI *identity* fields — the change that forces
         // a master respawn. Model/delegate changes are handled by
@@ -513,8 +542,16 @@ namespace winrt::TerminalApp::implementation
         // ProtocolVtSequenceReceived. Single source of the wta protocol-event
         // wire shape — callers just supply the method name and a params object.
         void _RaiseProtocolEvent(std::string_view method, const Json::Value& params);
-        void _TeardownAgentPane(const winrt::com_ptr<Tab>& tab, bool suppressMasterRestart = true);
-        void _RebuildAgentStack();
+        void _BeginAgentSessionRetirement(bool scopeAll,
+                                          std::vector<winrt::hstring> tabIds,
+                                          std::string reason,
+                                          std::string requestId,
+                                          std::function<void(std::string_view)> continuation);
+        safe_void_coroutine _WaitForAgentSessionRetirement(std::string operationId);
+        void _CompleteAgentSessionRetirement(std::string_view operationId, bool timedOut);
+        void _TeardownAgentPane(const winrt::com_ptr<Tab>& tab);
+        void _RebuildAgentStack(std::string requestId = {});
+        void _RestartAgentStack(std::string requestId);
         // Scoped per-tab rebuild after a tab's agent override changes
         // (agent-bar chip flyout). Does not restart the shared master.
         void _RebuildAgentPaneForTab(const winrt::com_ptr<Tab>& tab);

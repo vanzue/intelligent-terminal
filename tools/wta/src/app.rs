@@ -342,6 +342,40 @@ fn open_url_in_browser(url: &str) -> std::io::Result<()> {
     crate::win32::open_url_in_default_browser(url)
 }
 
+/// Members of `params.payload` that [`route_agent_event_to_registry_with_hook_sink`]
+/// actually reads.
+///
+/// This is the other half of the cross-language contract described on
+/// [`crate::agent_sessions::USER_INPUT_TOOL_NAMES`]. The hook producer
+/// (`BuildAgentHookEventJson` in `src/tools/wtcli/wtcli_functions.h`) redacts
+/// the payload with a denylist before broadcasting it, so a key that lands in
+/// that denylist while still being read here goes silently empty — no error,
+/// no log, just a blank cwd or a lost notification message.
+/// `hook_contract_tests` asserts the denylist and this list stay disjoint.
+///
+/// Nested lookups (`tool_input.question` / `.prompt` / `.message`) are covered
+/// by their `tool_input` parent, which the producer strips only for tools
+/// outside `USER_INPUT_TOOL_NAMES`.
+pub const CONSUMED_PAYLOAD_KEYS: &[&str] = &[
+    "cwd",
+    "tool_name",
+    "toolName",
+    "tool_input",
+    "message",
+    "notification_type",
+    "reason",
+    "error",
+];
+
+/// Members of `payload.tool_input` the routing function reads when the tool is
+/// a user-input tool.
+///
+/// The producer projects `tool_input` down to exactly these when an event
+/// overflows its wire budget (`ReduceOversizedHookPayload` in
+/// `src/tools/wtcli/wtcli_functions.h`), so a name missing here is dropped
+/// from the degraded payload and the notification loses its question text.
+pub const CONSUMED_TOOL_INPUT_KEYS: &[&str] = &["question", "prompt", "message"];
+
 /// Route a parsed `agent_event` payload into the AgentSessionRegistry.
 ///
 /// `pane_session_id` is the **WT pane GUID** ($env:WT_SESSION in the
@@ -544,7 +578,7 @@ where
                     .get("tool_input")
                     .and_then(|ti| {
                         ti.get("question")
-                        .or_else(|| ti.get("prompt"))
+                            .or_else(|| ti.get("prompt"))
                             .or_else(|| ti.get("message"))
                     })
                     .and_then(|v| v.as_str())
@@ -569,20 +603,57 @@ where
         // request, with many tool pairs in between). So ignore tool completions
         // here and let `agent.stop` own the turn-end → Idle, mirroring the
         // watcher's turn-based `classify_copilot` / `classify_codex`, which also
-        // ignore `tool.execution_complete`. Claude/Codex don't emit `tool.*`
-        // hook events at all, so this only affects Copilot/Gemini.
+        // ignore `tool.execution_complete`.
+        //
+        // Because these are dropped, no bundle subscribes them any more: each
+        // one cost a shell spawn (~400ms under PowerShell) plus a COM round
+        // trip, per tool call, to be discarded here. Copilot's `PostToolUse` /
+        // `PostToolUseFailure`, Gemini's `AfterTool`, and OpenCode's
+        // `tool.execute.after` were all removed. The arm stays so an older
+        // installed bundle that still emits them is ignored rather than
+        // mis-routed.
         "agent.tool.completed" | "agent.tool.finished" | "agent.tool.failed" => {
             return reg.take_dirty();
         }
         "agent.stop" | "agent.subagent.stop" => SessionEvent::ToolCompleted { key },
-        "agent.notification" => SessionEvent::Notification {
-            key,
-            message: payload
-                .get("message")
+        "agent.notification" => {
+            // Not every notification means "the agent is blocked on you".
+            // Claude's `Notification` hook covers two cases, distinguished by
+            // `notification_type`:
+            //
+            //   * `permission_prompt` — the agent wants approval for a tool.
+            //     Genuinely Attention: nothing proceeds until the user acts.
+            //   * `idle_prompt` — the agent already finished its turn and has
+            //     simply been sitting at an empty prompt for 60s. It fires
+            //     *after* `agent.stop` has correctly moved the row to Idle, so
+            //     treating it as Attention parks every session at "Claude is
+            //     waiting for your input" between turns.
+            //
+            // Drop `idle_prompt` and let `agent.stop` keep ownership of the
+            // turn-end transition, the same division of labour the tool
+            // completion arm above relies on. Deliberately *not* mapped to
+            // Idle: an unanswered `permission_prompt` also goes idle after
+            // 60s, and demoting that row would hide a pending approval.
+            //
+            // Unknown types stay Attention on purpose. Over-reporting costs a
+            // stale badge the next event clears; under-reporting loses a
+            // permission request with no other signal that it happened.
+            let notification_type = payload
+                .get("notification_type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
+                .unwrap_or("");
+            if notification_type == "idle_prompt" {
+                return reg.take_dirty();
+            }
+            SessionEvent::Notification {
+                key,
+                message: payload
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        }
         "agent.session.stopped" | "agent.session.end" => SessionEvent::SessionStopped {
             key,
             reason: payload
@@ -947,17 +1018,6 @@ pub struct App {
     // state (the command-completion candidates as the user types `/he…`)
     // lives on `TabSession`.
     pub help_overlay_visible: bool,
-    /// True once the helper's ACP transport to wta-master is lost
-    /// (`AgentFailure::TransportLost` — master died/crashed/was killed). The
-    /// helper has no in-process reconnect, so every slash command except
-    /// `/restart` would only fail against the dead pipe. While this is set the
-    /// command popup is filtered down to just `/restart` (other commands are
-    /// hidden, not greyed), and typing/Entering any other command is refused
-    /// with the reconnect hint. `/restart` is the one recovery that routes via
-    /// `wtcli publish` → C++ `SharedWta::Restart` (a path that doesn't touch
-    /// the dead pipe). Cleared when a fresh connection reaches `Connected`
-    /// (e.g. the post-sign-in reconnect).
-    pub transport_lost: bool,
     // Debug panel
     pub debug_messages: Vec<DebugMessage>,
     pub show_debug_panel: bool,
@@ -969,7 +1029,8 @@ pub struct App {
     pub(crate) input_dialog_area: Option<Rect>,
     pub(crate) pressed_input_dialog_tab: Option<String>,
     pub(crate) completed_turn_action_links: Vec<crate::action_links::CompletedTurnActionLink>,
-    pub(crate) painted_completed_turn_action_links: Vec<crate::action_links::CompletedTurnActionLink>,
+    pub(crate) painted_completed_turn_action_links:
+        Vec<crate::action_links::CompletedTurnActionLink>,
     // Pane identity (populated via VT channel)
     pub pane_id: Option<String>,
     pub tab_id: Option<String>,
@@ -1143,10 +1204,10 @@ pub const SELECTION_COPIED_HINT_WINDOW: std::time::Duration =
 pub(crate) fn known_cli_id(src: &crate::agent_sessions::CliSource) -> Option<&'static str> {
     use crate::agent_sessions::CliSource;
     match src {
-        CliSource::Claude  => Some("claude"),
-        CliSource::Codex   => Some("codex"),
+        CliSource::Claude => Some("claude"),
+        CliSource::Codex => Some("codex"),
         CliSource::Copilot => Some("copilot"),
-        CliSource::Gemini  => Some("gemini"),
+        CliSource::Gemini => Some("gemini"),
         CliSource::OpenCode => Some("opencode"),
         CliSource::Unknown(_) => None,
     }
@@ -1262,7 +1323,6 @@ impl App {
             master_request_tx,
             debug_capture_enabled,
             help_overlay_visible: false,
-            transport_lost: false,
             debug_messages: Vec::new(),
             show_debug_panel: false,
             debug_scroll: 0,
@@ -1494,30 +1554,30 @@ impl App {
                     let proposal_channels = Arc::clone(&self.proposal_channels);
                     tokio::task::spawn_local(async move {
                         if let Err(e) = crate::protocol::acp::client::run_acp_client_over_pipe(
-                                pipe_name,
-                                acp_model,
+                            pipe_name,
+                            acp_model,
                             cloud_models,
-                                agent_id_opt,
-                                agent_source,
-                                source_cwd,
-                                owner_tab_opt,
-                                None, // initial_load_session_id: already handled by the dead initial task
-                                event_tx_for_pipe.clone(),
-                                prompt_rx,
-                                cancel_rx,
-                                new_session_rx,
-                                load_session_rx,
-                                drop_session_rx,
-                                rename_session_rx,
-                                restart_rx,
-                                shrx,
-                                master_ext_rx,
-                                shell_mgr,
-                                wt_connected,
-                                post_login_auth, // only true on genuine LoginComplete reconnects
+                            agent_id_opt,
+                            agent_source,
+                            source_cwd,
+                            owner_tab_opt,
+                            None, // initial_load_session_id: already handled by the dead initial task
+                            event_tx_for_pipe.clone(),
+                            prompt_rx,
+                            cancel_rx,
+                            new_session_rx,
+                            load_session_rx,
+                            drop_session_rx,
+                            rename_session_rx,
+                            restart_rx,
+                            shrx,
+                            master_ext_rx,
+                            shell_mgr,
+                            wt_connected,
+                            post_login_auth, // only true on genuine LoginComplete reconnects
                             proposal_channels,
-                            )
-                            .await
+                        )
+                        .await
                         {
                             tracing::error!(
                                 target: "helper",
@@ -1825,7 +1885,12 @@ impl App {
     /// this helper owns. No-op on an empty/whitespace model — an empty
     /// override means "agent default", which `set_session_model` can't
     /// express.
-    fn send_session_model(&self, session_id: Option<String>, model: String) {
+    fn send_session_model(
+        &self,
+        session_id: Option<String>,
+        model: String,
+        pane_override: bool,
+    ) {
         if model.trim().is_empty() {
             return;
         }
@@ -1833,6 +1898,7 @@ impl App {
             crate::protocol::acp::client::MasterExtRequest::SetSessionModel {
                 session_id: session_id.map(agent_client_protocol::schema::v1::SessionId::new),
                 model,
+                pane_override,
             },
         );
     }
@@ -1859,7 +1925,7 @@ impl App {
                 continue;
             }
             if let Some(sid) = tab.session_id.clone() {
-                self.send_session_model(Some(sid), model.clone());
+                self.send_session_model(Some(sid), model.clone(), false);
             }
         }
     }
@@ -1877,7 +1943,6 @@ impl App {
         }
 
         self.acp_model = new_model.filter(|s| !s.trim().is_empty());
-        self.recompute_current_model_id();
         self.send_acp_model_update();
         self.publish_agent_status();
         true
@@ -2358,7 +2423,7 @@ impl App {
         let idx = self.current_tab().model_picker_selected;
         let id = self.model_picker_models.get(idx).map(|m| m.id.clone());
         if let Some(id) = id.filter(|id| self.model_pick_enabled(id)) {
-        self.close_model_picker();
+            self.close_model_picker();
             self.apply_model_pick(id);
         }
     }
@@ -2388,26 +2453,21 @@ impl App {
             return;
         }
 
-        let name = self
-            .available_models
-            .iter()
-            .find(|m| m.id == model_id)
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| model_id.clone());
-        let session_id = {
-            let tab = self.current_tab_mut();
-            tab.model_override = Some(model_id.clone());
-            tab.messages.push(ChatMessage::success(
-                t!("system.model_set", model = name.as_str()).into_owned(),
-            ));
-            tab.scroll_to_bottom();
-            tab.session_id.clone()
-        };
-        self.current_model_id = Some(model_id.clone());
-        self.agent_current_model_id = Some(model_id.clone());
+        let session_id = self.current_tab().session_id.clone();
         if let Some(session_id) = session_id {
-            self.send_session_model(Some(session_id), model_id);
+            self.send_session_model(Some(session_id), model_id, true);
+            return;
         }
+
+        let name = self.model_display_name(&model_id);
+        let tab = self.current_tab_mut();
+        tab.model_override = Some(model_id.clone());
+        tab.messages.push(ChatMessage::success(
+            t!("system.model_set", model = name.as_str()).into_owned(),
+        ));
+        tab.scroll_to_bottom();
+        self.current_model_id = Some(model_id.clone());
+        self.agent_current_model_id = Some(model_id);
         self.publish_agent_status();
     }
 
@@ -2466,6 +2526,15 @@ impl App {
     /// see and resume their history.
     pub fn current_cli_filter(&self) -> Option<crate::agent_sessions::CliSource> {
         crate::agent_sessions::CliSource::from_agent_id(&self.current_agent_id)
+    }
+
+    /// Execution source this pane's agent runs in, used to narrow the session
+    /// view alongside [`Self::current_cli_filter`]. `CliSource` does not
+    /// distinguish host Copilot from Copilot inside a WSL distro, so without
+    /// this every Copilot pane renders one merged list of sessions from every
+    /// source — including rows it cannot resume.
+    pub fn current_location_filter(&self) -> crate::agent_sessions::SessionLocation {
+        self.current_agent_source.session_location()
     }
 
     /// Extracted focus-pane dispatch for Live rows. Shared between the
@@ -3290,6 +3359,7 @@ impl App {
 
     fn agents_rows_for_tab(&self, tab_id: &str) -> Vec<crate::agent_sessions::AgentSession> {
         let filter = self.current_cli_filter();
+        let source = self.current_location_filter();
         let origin = self.sessions_origin_filter;
         let query = self
             .tab_sessions
@@ -3314,6 +3384,7 @@ impl App {
             // `matches(&s.origin)` is sufficient and stays consistent
             // with the registry branch below.
             rows.retain(|s| origin.matches(&s.origin));
+            rows.retain(|s| crate::ui::agents_view::matches_source(s, &source));
             rows.retain(|s| crate::ui::agents_view::matches_folded_query(s, &folded_query));
             rows
         } else {
@@ -3323,6 +3394,7 @@ impl App {
                 .into_iter()
                 .cloned()
                 .collect();
+            rows.retain(|s| crate::ui::agents_view::matches_source(s, &source));
             rows.retain(|s| crate::ui::agents_view::matches_folded_query(s, &folded_query));
             rows
         }
@@ -4015,6 +4087,8 @@ impl App {
             AppEvent::UsageReported { .. } => "usage_reported",
             AppEvent::UsageCleared { .. } => "usage_cleared",
             AppEvent::ModelConfigUpdated { .. } => "model_config_updated",
+            AppEvent::ModelSetCompleted { .. } => "model_set_completed",
+            AppEvent::ModelSetFailed { .. } => "model_set_failed",
             AppEvent::SessionConfigUpdated { .. } => "session_config_updated",
             AppEvent::SessionConfigSetCompleted { .. } => "session_config_set_completed",
             AppEvent::SessionConfigSetFailed { .. } => "session_config_set_failed",
@@ -4025,6 +4099,7 @@ impl App {
             AppEvent::PromptTemplateLoaded { .. } => "prompt_template_loaded",
             AppEvent::PromptTargetResolved { .. } => "prompt_target_resolved",
             AppEvent::AgentError { .. } => "agent_error",
+            AppEvent::MasterDisconnected => "master_disconnected",
             AppEvent::AgentSoftStop { .. } => "agent_soft_stop",
             AppEvent::AgentBusy { .. } => "agent_busy",
             AppEvent::TabRenamed { .. } => "tab_renamed",
@@ -4232,13 +4307,21 @@ impl App {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let target_tab = params.get("tab_id").and_then(|v| v.as_str()).unwrap_or("");
+        let target_pane = params.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
         let our_window = self.window_id.as_deref().unwrap_or("");
         let owner_tab = self.owner_tab_id.as_deref().unwrap_or("");
+        let our_pane = self.pane_id.as_deref().unwrap_or("");
+        let pane_matches = !target_pane.is_empty()
+            && !our_pane.is_empty()
+            && target_pane
+                .trim_matches(['{', '}'])
+                .eq_ignore_ascii_case(our_pane.trim_matches(['{', '}']));
 
         if target_window.is_empty()
             || target_tab.is_empty()
             || owner_tab.is_empty()
             || target_tab != owner_tab
+            || !pane_matches
             || (!our_window.is_empty() && target_window != our_window)
         {
             tracing::debug!(
@@ -4247,6 +4330,8 @@ impl App {
                 our_window,
                 target_tab,
                 owner_tab,
+                target_pane,
+                our_pane,
                 "ignoring paste event not targeted at this helper"
             );
             return None;
@@ -4258,7 +4343,7 @@ impl App {
     fn agent_paste_input_is_live(&self, target_tab: &str) -> bool {
         self.tab_sessions
             .get(target_tab)
-            .map(|tab| tab.current_view == View::Chat && tab.input_has_nav_focus())
+            .map(|tab| tab.pane_open && tab.current_view == View::Chat && tab.input_has_nav_focus())
             .unwrap_or(false)
     }
 
@@ -4303,10 +4388,11 @@ impl App {
         let byte_len = text.len();
         let line_count = text.split('\n').count();
         let tab = self.tab_mut(target_tab);
-        if tab.current_view != View::Chat || !tab.input_has_nav_focus() {
+        if !tab.pane_open || tab.current_view != View::Chat || !tab.input_has_nav_focus() {
             tracing::debug!(
                 target: "agent_paste",
                 tab_id = target_tab,
+                pane_open = tab.pane_open,
                 view = ?tab.current_view,
                 input_live = tab.input_has_nav_focus(),
                 byte_len,
@@ -4541,26 +4627,10 @@ impl App {
         if !self.command_popup_visible() {
             return None;
         }
-        // When the transport to master is lost, only /restart can run — so the
-        // popup simply doesn't show the other commands (rather than greying
-        // them). Collapse the candidate list to /restart if it's among the
-        // search matches; otherwise show nothing (the typed query excludes
-        // it, e.g. "/new"), and the Enter handler surfaces the reconnect hint.
         // Static command and move candidates borrow the tab's lists. Agent
         // candidates are filtered from the small cached available-agent list.
         let agent_candidates: Vec<_> = self.agent_command_candidates().collect();
-        let candidates = if self.transport_lost {
-            let filtered: Vec<&'static crate::commands::CommandSpec> = tab
-                .command_popup_candidates
-                .iter()
-                .copied()
-                .filter(|s| s.kind == crate::commands::CommandKind::Restart)
-                .collect();
-            if filtered.is_empty() {
-                return None;
-            }
-            crate::ui::PopupCandidates::Commands(std::borrow::Cow::Owned(filtered))
-        } else if !agent_candidates.is_empty() {
+        let candidates = if !agent_candidates.is_empty() {
             crate::ui::PopupCandidates::Agents(agent_candidates)
         } else if !tab.move_position_candidates.is_empty() {
             crate::ui::PopupCandidates::MovePositions(tab.move_position_candidates.as_slice())
@@ -4573,11 +4643,7 @@ impl App {
             candidates,
             selected: tab.command_popup_selected,
             pane_focused: self.pane_focused,
-            command_query: tab
-                .input
-                .trim_start()
-                .strip_prefix('/')
-                .unwrap_or_default(),
+            command_query: tab.input.trim_start().strip_prefix('/').unwrap_or_default(),
             current_model: self.current_model_display(),
         })
     }
@@ -4599,55 +4665,45 @@ impl App {
             .or_else(|| self.current_model_id.clone())
             .or_else(|| self.acp_model.clone())
             .filter(|s| !s.trim().is_empty())?;
-        let name = self
-            .available_models
-            .iter()
-            .find(|m| m.id == id)
-            .map(|m| m.name.clone())
-            .unwrap_or(id);
-        Some(name)
+        Some(self.model_display_name(&id))
     }
 
-    /// Whether the command popup is *effectively* visible — i.e. actually
-    /// rendered. This is the same condition `command_popup_state()` uses to
-    /// decide whether to draw, so key handlers gate on the real on-screen
-    /// state: in degraded mode the candidate list is filtered to `/restart`,
-    /// so when the typed prefix excludes it (e.g. `/new`) nothing is drawn and
-    /// this returns false — the Up/Down/Tab/Enter arms then fall through to
-    /// their normal behavior instead of swallowing the key against an
-    /// invisible popup.
+    fn confirmed_model_display(&self) -> Option<String> {
+        let id = self
+            .current_tab()
+            .model_override
+            .as_deref()
+            .or(self.agent_current_model_id.as_deref())
+            .or_else(|| self.selected_custom_model_id())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())?;
+        Some(self.model_display_name(id))
+    }
+
+    fn model_display_name(&self, id: &str) -> String {
+        self.available_models
+            .iter()
+            .find(|model| model.id == id)
+            .map(|model| model.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    /// Whether the command popup is effectively visible this frame.
     pub(super) fn command_popup_visible(&self) -> bool {
-        if !self.current_tab().command_popup_visible()
-            && self.agent_command_candidates().next().is_none()
-        {
-            return false;
-        }
-        if self.transport_lost {
-            // Only /restart is offered; if the prefix excludes it the popup
-            // isn't drawn.
-            return self
-                .current_tab()
-                .command_popup_candidates
-                .iter()
-                .any(|s| s.kind == crate::commands::CommandKind::Restart);
-        }
-        true
+        self.current_tab().command_popup_visible()
+            || self.agent_command_candidates().next().is_some()
     }
 
     fn agent_command_candidates(&self) -> impl Iterator<Item = &AvailableAgent> {
-        let prefix = if self.transport_lost {
-            None
-        } else {
-            commands::agent_id_prefix(&self.current_tab().input)
-        };
+        let prefix = commands::agent_id_prefix(&self.current_tab().input);
         self.available_agents.iter().filter(move |agent| {
-                prefix.is_some_and(|prefix| {
-                    agent
-                        .id
-                        .get(..prefix.len())
-                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
-                })
+            prefix.is_some_and(|prefix| {
+                agent
+                    .id
+                    .get(..prefix.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
             })
+        })
     }
 
     fn selected_agent_command_candidate(&self) -> Option<&AvailableAgent> {
@@ -4766,42 +4822,27 @@ impl App {
         //    `/he` → /help) and never submits the raw text as a prompt, so
         //    this arm is always consumed even if there is no selection.
         if self.command_popup_visible() {
-            // When the transport to master is lost, only /restart is runnable
-            // (everything else would hit the dead pipe). Pick the /restart
-            // spec if it's in the filtered candidate list; otherwise there's
-            // nothing to run, so consume Enter and show the reconnect hint.
-            if !self.transport_lost {
-                let selected_agent = self.selected_agent_command_candidate();
-                if let Some(parsed) =
-                    agent_command_on_enter(&self.current_tab().input, selected_agent)
-                {
-                    self.current_tab_mut().clear_input();
-                    self.handle_slash_command(parsed);
-                    return true;
-                }
-                if let Some(position) = self.current_tab().selected_move_position() {
-                    let spec = commands::lookup("move").expect("/move is registered");
-                    let parsed = ParsedCommand {
-                        kind: CommandKind::Move,
-                        spec,
-                        rest: position.name.to_string(),
-                    };
-                    self.current_tab_mut().clear_input();
-                    self.handle_slash_command(parsed);
-                    return true;
-                }
+            let selected_agent = self.selected_agent_command_candidate();
+            if let Some(parsed) =
+                agent_command_on_enter(&self.current_tab().input, selected_agent)
+            {
+                self.current_tab_mut().clear_input();
+                self.handle_slash_command(parsed);
+                return true;
+            }
+            if let Some(position) = self.current_tab().selected_move_position() {
+                let spec = commands::lookup("move").expect("/move is registered");
+                let parsed = ParsedCommand {
+                    kind: CommandKind::Move,
+                    spec,
+                    rest: position.name.to_string(),
+                };
+                self.current_tab_mut().clear_input();
+                self.handle_slash_command(parsed);
+                return true;
             }
 
-            let spec = if self.transport_lost {
-                self.current_tab()
-                    .command_popup_candidates
-                    .iter()
-                    .copied()
-                    .find(|s| s.kind == CommandKind::Restart)
-            } else {
-                self.current_tab().selected_command_spec()
-            };
-            match spec {
+            match self.current_tab().selected_command_spec() {
                 Some(spec) => {
                     let parsed = ParsedCommand {
                         kind: spec.kind,
@@ -4813,9 +4854,6 @@ impl App {
                 }
                 None => {
                     self.current_tab_mut().clear_input();
-                    if self.transport_lost {
-                        self.push_degraded_command_hint();
-                    }
                 }
             }
             return true;
@@ -4827,13 +4865,6 @@ impl App {
         }
         match commands::classify(&self.current_tab().input) {
             ParseOutcome::Command(cmd) => {
-                // Degraded: a typed command other than /restart can't run
-                // against the dead pipe — swallow it with the reconnect hint.
-                if self.transport_lost && cmd.kind != CommandKind::Restart {
-                    self.current_tab_mut().clear_input();
-                    self.push_degraded_command_hint();
-                    return true;
-                }
                 self.current_tab_mut().clear_input();
                 self.handle_slash_command(cmd);
                 true
@@ -4851,17 +4882,6 @@ impl App {
         }
     }
 
-    /// Append the localized "connection to the agent was lost — /restart to
-    /// reconnect" line to the active tab. Shown when the user invokes any
-    /// slash command other than /restart while the transport to master is
-    /// down (reuses the existing `connection.lost` string).
-    fn push_degraded_command_hint(&mut self) {
-        let msg = t!("connection.lost").into_owned();
-        self.current_tab_mut()
-            .messages
-            .push(ChatMessage::warning(msg));
-    }
-
     /// Dispatch a parsed slash-command. The Enter handler is responsible
     /// for clearing the input and cursor before calling this.
     fn handle_slash_command(&mut self, cmd: ParsedCommand) {
@@ -4872,16 +4892,6 @@ impl App {
             in_flight,
             "dispatch"
         );
-
-        // Transport to master is lost — only /restart can recover (it routes
-        // via wtcli→COM, not the dead pipe). Refuse everything else with the
-        // reconnect hint so a command can never silently fail against a dead
-        // connection. This is the defensive backstop; the Enter handler and
-        // greyed popup already steer the user here.
-        if self.transport_lost && cmd.kind != CommandKind::Restart {
-            self.push_degraded_command_hint();
-            return;
-        }
 
         // Thin dispatch: each arm's logic lives in a `cmd_*` method so a
         // single command can be read and unit-tested in isolation. `in_flight`
@@ -4944,8 +4954,9 @@ impl App {
     fn cmd_new(&mut self, in_flight: bool) {
         if in_flight {
             let tab = self.current_tab_mut();
-            tab.messages
-                .push(ChatMessage::warning(t!("system.busy_use_stop").into_owned()));
+            tab.messages.push(ChatMessage::warning(
+                t!("system.busy_use_stop").into_owned(),
+            ));
             tab.scroll_to_bottom();
             return;
         }
@@ -4954,9 +4965,9 @@ impl App {
             .clone()
             .unwrap_or_else(|| DEFAULT_TAB_ID.to_string());
         let _ = self.new_session_tx.send(NewSessionForTab {
-                tab_id,
-                cwd: self.source_cwd.clone(),
-            });
+            tab_id,
+            cwd: self.source_cwd.clone(),
+        });
         if let Some(session_id) = self.current_tab().session_id.clone() {
             self.session_model_configs.remove(&session_id);
             self.session_config_options.remove(&session_id);
@@ -4990,8 +5001,9 @@ impl App {
     fn cmd_fix(&mut self, in_flight: bool, hint: String) {
         if in_flight {
             let tab = self.current_tab_mut();
-            tab.messages
-                .push(ChatMessage::warning(t!("system.busy_use_stop").into_owned()));
+            tab.messages.push(ChatMessage::warning(
+                t!("system.busy_use_stop").into_owned(),
+            ));
             tab.scroll_to_bottom();
             return;
         }
@@ -5219,8 +5231,7 @@ impl App {
                 let offset = self.current_tab().rec_scroll.offset;
                 // `card_h` includes the inter-card gap, so subtracting it
                 // yields the rendered card's exclusive bottom row.
-                let rendered_bottom_exclusive =
-                    line_top.saturating_add(card_h.saturating_sub(1));
+                let rendered_bottom_exclusive = line_top.saturating_add(card_h.saturating_sub(1));
                 let viewport_bottom = offset.saturating_add(viewport_height);
                 if line_top < offset || rendered_bottom_exclusive > viewport_bottom {
                     self.current_tab_mut().rec_scroll.set(line_top);
@@ -5286,6 +5297,7 @@ impl App {
         self.agent_models = models;
         self.agent_current_model_id = current;
         self.rebuild_model_catalog_from_agent_state();
+        self.publish_agent_status();
 
         // The new active tab's `current_view` (and autofix bar) is now
         // authoritative for the shared C++ agent pane. Re-emit so the bar
@@ -5327,14 +5339,12 @@ impl App {
         self.session_to_tab.retain(|_, tab| tab != closed_tab_id);
 
         // Tell the ACP client to release the binding for this tab so
-        // the agent process can `session/cancel` the orphaned session.
+        // master can `session/close` the orphaned session.
         // Without this, every closed tab leaves a live ACP session
         // behind on the CLI side — `tab_sessions` and `session_to_tab`
         // are cleaned above but the ACP layer's own `tab_to_session`
         // map and the agent's session state are not.
-        let _ = self.drop_session_tx.send(DropSessionRequest {
-            tab_id: closed_tab_id.to_string(),
-        });
+        self.request_tab_session_close(closed_tab_id);
 
         if self.tab_id.as_deref() == Some(closed_tab_id) {
             // Active tab is gone; the next focused tab's tab_changed will
@@ -5355,6 +5365,18 @@ impl App {
             remaining_tabs = self.tab_sessions.len(),
             "drop_tab_session"
         );
+    }
+
+    /// Ask master to close the ACP session for a destroyed stable tab id
+    /// without touching this helper's local per-window tab state. WT events
+    /// are process-wide, so helpers in other windows use this path to cover
+    /// the race where every helper in the owning window exits before handling
+    /// `tab_closed`.
+    pub(crate) fn request_tab_session_close(&self, closed_tab_id: &str) {
+        let _ = self.drop_session_tx.send(DropSessionRequest {
+            tab_id: closed_tab_id.to_string(),
+            notify_master: true,
+        });
     }
 
     /// Rekey per-tab state after a tab-drag rename. WT mints a fresh
@@ -5401,6 +5423,7 @@ impl App {
                     entry = existing;
                 }
             }
+            entry.invalidate_pending_paste();
             self.tab_sessions.insert(new_tab_id.to_string(), entry);
             true
         } else {
@@ -5518,10 +5541,10 @@ impl App {
     ///   - Conversation history, completed turns, in-flight state are gone.
     ///   - `session_to_tab` entries pointing at this tab are pruned so any
     ///     late ACP events for the old SessionId can't route back in.
-    ///   - The ACP client task is asked to drop the binding in
-    ///     `tab_to_session` and cancel any in-flight prompt for the old
-    ///     SessionId; the next prompt on this tab lazily creates a fresh
-    ///     ACP session.
+    ///   - The ACP client task drops the binding in `tab_to_session` and
+    ///     cancels any in-flight prompt for the old SessionId. The master
+    ///     consumes the same process-wide WT event and owns the physical
+    ///     close; the next prompt lazily creates a fresh ACP session.
     /// Unlike `drop_tab_session`, this preserves the HashMap key — the
     /// next tab_changed back into this tab finds an empty-but-present
     /// `TabSession` and just renders an empty chat.
@@ -5550,6 +5573,7 @@ impl App {
         // Ask the ACP client task to release the binding for this tab.
         let _ = self.drop_session_tx.send(DropSessionRequest {
             tab_id: tab_id.to_string(),
+            notify_master: false,
         });
 
         tracing::info!(
