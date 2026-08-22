@@ -56,6 +56,45 @@
                   FontSize="12"
                   Glyph="&#xEC05;"
                   Visibility="{x:Bind TabStatus.IsInputBroadcastActive, Mode=OneWay}" />
+        <Button x:Name="ActivityIndicator"
+                MinWidth="0"
+                MinHeight="0"
+                Margin="0,0,8,0"
+                Padding="0"
+                AutomationProperties.Name="{x:Bind TabStatus.ActivityAutomationName, Mode=OneWay}"
+                Background="Transparent"
+                BorderThickness="0"
+                Click="_ActivityIndicatorClick"
+                ToolTipService.ToolTip="{x:Bind TabStatus.ActivityTooltip, Mode=OneWay}"
+                Visibility="{x:Bind TabStatus.IsActivityIndicatorVisible, Mode=OneWay}">
+            <StackPanel Orientation="Horizontal">
+                <mux:ProgressRing Width="15"
+                                  Height="15"
+                                  MinWidth="0"
+                                  MinHeight="0"
+                                  IsActive="{x:Bind TabStatus.IsActivityWorking, Mode=OneWay}"
+                                  IsIndeterminate="True"
+                                  Visibility="{x:Bind TabStatus.IsActivityWorking, Mode=OneWay}" />
+                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          FontSize="12"
+                          Glyph="&#xE7C1;"
+                          Visibility="{x:Bind TabStatus.IsActivityUpdate, Mode=OneWay}" />
+                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          FontSize="12"
+                          Foreground="{ThemeResource ErrorTextBrush}"
+                          Glyph="&#xEA39;"
+                          Visibility="{x:Bind TabStatus.IsActivityError, Mode=OneWay}" />
+                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          FontSize="12"
+                          Glyph="&#xE7BA;"
+                          Visibility="{x:Bind TabStatus.IsActivityActionRequired, Mode=OneWay}" />
+                <TextBlock Margin="3,0,0,0"
+                           VerticalAlignment="Center"
+                           FontSize="11"
+                           Text="{x:Bind TabStatus.ActivityCountText, Mode=OneWay}"
+                           Visibility="{x:Bind TabStatus.IsActivityCountVisible, Mode=OneWay}" />
+            </StackPanel>
+        </Button>
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"
                    Visibility="Visible" />

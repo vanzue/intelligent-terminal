@@ -52,6 +52,7 @@ class TerminalCoreUnitTests::ShellIntegrationTests final
     TEST_METHOD(PowerShell_ScriptContent_HandlesNullLastExitCode);
     TEST_METHOD(PowerShell_ScriptContent_TracksUnhistoriedErrors);
     TEST_METHOD(PowerShell_ScriptContent_GatesRestrictedLanguageFeatures);
+    TEST_METHOD(PowerShell_ScriptContent_EmitsCommandStart);
 
     // Install scenarios.
     TEST_METHOD(Install_EmptyPath_Fails);
@@ -487,6 +488,22 @@ void ShellIntegrationTests::PowerShell_ScriptContent_GatesRestrictedLanguageFeat
                        referenceCheck < lazyParseGuard &&
                        lazyParseGuard < parseInput,
                    L"Constrained Language Mode must bypass static parser and reference-identity method calls");
+}
+
+void ShellIntegrationTests::PowerShell_ScriptContent_EmitsCommandStart()
+{
+    const auto script = ShellIntegrationScriptContent();
+    const auto readLineWrapper = script.find("function Global:PSConsoleHostReadLine");
+    const auto lineRead = script.find("$line = & $Global:__ShellInteg_OriginalPSConsoleHostReadLine @args", readLineWrapper);
+    const auto nonEmptyGuard = script.find("[string]::IsNullOrWhiteSpace($line)", lineRead);
+    const auto commandStart = script.find("]133;C", nonEmptyGuard);
+    const auto returnLine = script.find("return $line", commandStart);
+
+    VERIFY_IS_TRUE(readLineWrapper != std::string::npos &&
+                       lineRead < nonEmptyGuard &&
+                       nonEmptyGuard < commandStart &&
+                       commandStart < returnLine,
+                   L"OSC 133;C must be emitted once after a non-empty line is submitted and before it is returned to PowerShell");
 }
 
 // ─── Install ──────────────────────────────────────────────────────────────────
@@ -1197,10 +1214,13 @@ void ShellIntegrationTests::Bash_ScriptContent_HasIdempotencyGuardAndOscSequence
     // Bash-only + interactive-only guards.
     VERIFY_IS_TRUE(_Contains(script, "BASH_VERSION"));
     VERIFY_IS_TRUE(_Contains(script, "case \"${-:-}\" in *i*"));
-    // The three OSC sequences the autofix pipeline downstream depends on.
+    // The four OSC sequences the shell lifecycle pipeline downstream depends on.
     VERIFY_IS_TRUE(_Contains(script, "133;D;%s"));
     VERIFY_IS_TRUE(_Contains(script, "133;A"));
     VERIFY_IS_TRUE(_Contains(script, "133;B"));
+    VERIFY_IS_TRUE(_Contains(script, "133;C"));
+    VERIFY_IS_TRUE(_Contains(script, "PS0=\"${PS0:-}\""),
+                   L"OSC 133;C must use Bash's pre-execution PS0 hook without replacing a user-defined PS0");
     // CWD reporting — unquoted form (the Terminal's 9;9 parser
     // rejects payloads with embedded quotes, and Linux paths can
     // contain `"`; the unquoted form parses cleanly regardless).

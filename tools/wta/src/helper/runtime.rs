@@ -1160,6 +1160,23 @@ async fn run_acp_app(
                 app_state.window_id = Some(window_id);
             }
 
+            // Terminal assigns the connection SessionId before starting this
+            // helper. Prefer that authoritative identity over PID discovery,
+            // which can race a newly-created ConPTY.
+            if let Some(owner_pane_id) = config
+                .owner_pane_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                tracing::info!(
+                    target: "tab_session",
+                    pane_id = %owner_pane_id,
+                    "seeded app_state.pane_id from --owner-pane-id"
+                );
+                app_state.pane_id = Some(owner_pane_id.to_string());
+            }
+
             // WT knows the owning window authoritatively when it creates the
             // helper. Prefer that seed over best-effort PID discovery so
             // outbound per-window events work from the first render.

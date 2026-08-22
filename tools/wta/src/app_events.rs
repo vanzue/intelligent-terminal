@@ -601,6 +601,10 @@ impl App {
                 tab.replay_agent_buffer.clear();
                 tab.replay_user_buffer.clear();
                 tab.timing_note = None;
+                if let Some(operation_id) = tab.turn.prompt().map(|prompt| prompt.id) {
+                    tab.activity_operation_id = operation_id;
+                    tab.activity_outcome = Some(AgentActivityOutcome::Failed);
+                }
                 tab.turn = TurnState::Idle;
                 tab.active_direct_proposal_id = None;
                 tab.messages.push(ChatMessage::Error(message));
@@ -746,6 +750,11 @@ impl App {
                     });
                     // Clear error messages
                     let tab = self.current_tab_mut();
+                    if let Some(operation_id) = tab.turn.prompt().map(|prompt| prompt.id) {
+                        tab.activity_operation_id = operation_id;
+                        tab.activity_outcome = Some(AgentActivityOutcome::Failed);
+                        tab.turn = TurnState::Idle;
+                    }
                     tab.messages.retain(|m| !matches!(m, ChatMessage::Error(_)));
                 } else {
                     if !session_survives {
@@ -758,6 +767,10 @@ impl App {
                     };
                     tab.activity_frame = 0;
                     tab.timing_note = None;
+                    if let Some(operation_id) = tab.turn.prompt().map(|prompt| prompt.id) {
+                        tab.activity_operation_id = operation_id;
+                        tab.activity_outcome = Some(AgentActivityOutcome::Failed);
+                    }
                     tab.turn = TurnState::Idle;
                     // Suppress only an *identical* consecutive error, not any
                     // trailing error. When the master/agent dies, two errors can

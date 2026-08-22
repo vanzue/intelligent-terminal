@@ -60,9 +60,9 @@ pub use crate::turn_context::TurnContext;
 use input_edit::{next_word_boundary, prev_word_boundary, INPUT_HISTORY_MAX_ENTRIES};
 pub(crate) use tab_state::DEFAULT_TAB_ID;
 pub use tab_state::{
-    ChatMessage, CompletedTurn, ConfigPickerState, NoticeKind, PermissionState,
-    RecommendationFocus, TabSession, ToolCallContent, ToolCallKind, ToolCallLocation,
-    ToolCallOutput, UserInputState, View,
+    AgentActivityOutcome, ChatMessage, CompletedTurn, ConfigPickerState, NoticeKind,
+    PermissionState, RecommendationFocus, TabSession, ToolCallContent, ToolCallKind,
+    ToolCallLocation, ToolCallOutput, UserInputState, View,
 };
 pub use turn_state::{AutofixContext, ChunkKind, SubmittedPrompt, TurnOutcome, TurnState};
 
@@ -995,6 +995,7 @@ pub struct App {
     // None (falling back to `DEFAULT_TAB_ID`) for manual `wta` runs.
     // Lazily extended on each new `tab_changed` event.
     pub(crate) tab_sessions: HashMap<String, TabSession>,
+    last_projected_activity: HashMap<String, serde_json::Value>,
     // Reverse lookup: ACP `SessionId` → tab id. Populated from
     // `AgentConnected` (the startup session, bound to whichever tab the
     // process owns) and `SessionAttached` (lazily-created sessions for
@@ -1281,6 +1282,7 @@ impl App {
             show_notification_banner: false,
             autofix_enabled,
             tab_sessions,
+            last_projected_activity: HashMap::new(),
             session_to_tab: HashMap::new(),
             agent_sessions: crate::agent_sessions::AgentSessionRegistry::new(),
             agent_supports_load_session: false,
@@ -3852,6 +3854,7 @@ impl App {
                     let should_redraw = self.event_requires_redraw(&event);
                     let handle_started = std::time::Instant::now();
                     self.handle_event(event);
+                    self.project_changed_activity_states();
                     ui_trace::log_slow("ui_event_handle", handle_started.elapsed(), || {
                         format!("event={} {}", event_name, self.trace_state())
                     });
@@ -3888,6 +3891,7 @@ impl App {
                             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                         }
                     }
+                    self.project_changed_activity_states();
 
                     ui_trace::log_slow("event_batch_handle", batch_started.elapsed(), || {
                         format!(

@@ -375,8 +375,11 @@ namespace Microsoft::Terminal::ShellIntegration::Powershell
     // true, $Error[0] is null, and Get-History has no entry. Wrap
     // PSConsoleHostReadLine to retain the submitted line, then parse it lazily
     // in prompt only when no normal completion signal exists.
+    //
+    // v7: emit OSC 133;C at the PSReadLine submission boundary so command
+    // execution is distinguishable from command-line editing.
     // ───────────────────────────────────────────────────────────────────
-    inline constexpr int kVersion = 6;
+    inline constexpr int kVersion = 7;
 
     inline std::wstring ScriptFileName()
     {
@@ -415,7 +418,7 @@ namespace Microsoft::Terminal::ShellIntegration::Powershell
     inline std::string ScriptContent()
     {
         return std::string{
-            R"(# Shell Integration — non-invasive prompt wrapper
+            R"ITPS(# Shell Integration — non-invasive prompt wrapper
 # Emits OSC 133 (command marks / exit code) and OSC 9;9 (CWD) escape
 # sequences WITHOUT altering the visual appearance of the user's prompt.
 #
@@ -446,6 +449,9 @@ if (-not $Global:__ShellInteg_Installed) {
             $line = & $Global:__ShellInteg_OriginalPSConsoleHostReadLine @args
             $Global:__ShellInteg_LastSubmittedLine =
                 if ($line -is [string]) { $line } else { $null }
+            if ($line -is [string] -and -not [string]::IsNullOrWhiteSpace($line)) {
+                [Console]::Out.Write("$($Global:__ShellInteg_ESC)]133;C$($Global:__ShellInteg_BEL)")
+            }
             return $line
         }
     }
@@ -530,7 +536,7 @@ if (-not $Global:__ShellInteg_Installed) {
         return "${prefix}${originalOutput}${suffix}"
     }
 }
-)"
+)ITPS"
         };
     }
 

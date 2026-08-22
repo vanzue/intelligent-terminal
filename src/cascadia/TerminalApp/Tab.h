@@ -3,6 +3,7 @@
 
 #pragma once
 #include "Pane.h"
+#include "PaneActivity.h"
 #include "ColorPickupFlyout.h"
 #include "Tab.h"
 #include "Tab.g.h"
@@ -15,6 +16,25 @@ namespace TerminalAppLocalTests
 
 namespace winrt::TerminalApp::implementation
 {
+    struct PaneActivityEntry
+    {
+        uint32_t paneId{ 0 };
+        ::TerminalApp::PaneActivity::Phase phase{ ::TerminalApp::PaneActivity::Phase::Unknown };
+        ::TerminalApp::PaneActivity::Attention attention{ ::TerminalApp::PaneActivity::Attention::None };
+        ::TerminalApp::PaneActivity::Availability availability{ ::TerminalApp::PaneActivity::Availability::Connecting };
+        ::TerminalApp::PaneActivity::Outcome lastOutcome{ ::TerminalApp::PaneActivity::Outcome::None };
+        ::TerminalApp::PaneActivity::OperationKind operationKind{ ::TerminalApp::PaneActivity::OperationKind::None };
+        ::TerminalApp::PaneActivity::ProgressState progressState{ ::TerminalApp::PaneActivity::ProgressState::None };
+        uint32_t progressValue{ 0 };
+        uint64_t revision{ 0 };
+        bool hidden{ false };
+        std::wstring summary;
+        std::wstring lastCommand;
+        std::optional<uint32_t> lastExitCode;
+        std::wstring paneTitle;
+        std::wstring workingDirectory;
+    };
+
     struct Tab : TabT<Tab>
     {
     public:
@@ -101,6 +121,8 @@ namespace winrt::TerminalApp::implementation
 
         std::shared_ptr<Pane> GetRootPane() const { return _rootPane; }
         std::vector<uint32_t> GetMruPanes() const { return _mruPanes; }
+        std::vector<PaneActivityEntry> ActivityEntries() const;
+        void ActivateActivityPane(uint32_t paneId);
 
         // Returns the AgentPaneContent (if any) hosted in this tab's pane
         // tree. The presence of an AgentPaneContent IS the truth — a tab has
@@ -294,10 +316,14 @@ namespace winrt::TerminalApp::implementation
             winrt::Microsoft::Terminal::Control::TermControl::KeySent_revoker KeySent;
             winrt::Microsoft::Terminal::Control::TermControl::CharSent_revoker CharSent;
             winrt::Microsoft::Terminal::Control::TermControl::StringSent_revoker StringSent;
+            winrt::Microsoft::Terminal::Control::TermControl::VtSequenceReceived_revoker VtSequenceReceived;
+            winrt::TerminalApp::AgentPaneContent::StateChanged_revoker AgentStateChanged;
 
             winrt::TerminalApp::TerminalPaneContent::RestartTerminalRequested_revoker RestartTerminalRequested;
         };
         std::unordered_map<uint32_t, ContentEventTokens> _contentEvents;
+        std::unordered_map<uint32_t, ::TerminalApp::PaneActivity::State> _paneActivityStates;
+        ::TerminalApp::PaneActivity::Aggregate _tabActivity{};
 
         winrt::event_token _rootClosedToken{};
 
@@ -337,6 +363,11 @@ namespace winrt::TerminalApp::implementation
         void _RecalculateAndApplyReadOnly();
 
         void _UpdateProgressState();
+        void _ApplyPaneActivitySignal(uint32_t paneId, const ::TerminalApp::PaneActivity::Signal& signal);
+        void _ApplyAgentActivity(uint32_t paneId, const winrt::TerminalApp::AgentPaneContent& content);
+        void _UpdateActivityState();
+        void _ActivityIndicatorInvoked();
+        bool _IsPaneObserved(uint32_t paneId) const;
 
         void _UpdateConnectionClosedState();
         void _RestartActivePaneConnection();

@@ -88,12 +88,34 @@
 
         <mux:TabView.TabStripFooter>
             <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
                 <!--  Remove this border after WinUI 2.8  -->
-                <Border Height="1"
+                <Border Grid.ColumnSpan="2"
+                        Height="1"
                         VerticalAlignment="Bottom"
                         Background="{ThemeResource CardStrokeColorDefaultBrush}" />
 
+                <!--  E823 is the "TimelineProgress" glyph.  -->
+                <Button x:Name="ActivityCenterButton"
+                        Grid.Column="0"
+                        Width="31"
+                        Height="24"
+                        Margin="0,4"
+                        Padding="0"
+                        VerticalAlignment="Stretch"
+                        AutomationProperties.AccessibilityView="Control"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Content="&#xE823;"
+                        FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                        FontSize="12" />
+
                 <mux:SplitButton x:Name="NewTabButton"
+                                 Grid.Column="1"
                                  x:Uid="NewTabSplitButton"
                                  Height="24"
                                  Margin="0,4"

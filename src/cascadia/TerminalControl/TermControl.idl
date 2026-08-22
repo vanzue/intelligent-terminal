@@ -141,6 +141,7 @@ namespace Microsoft.Terminal.Control
 
         String ReadEntireBuffer();
         String ReadLastPrompt();
+        String ReadLastCommand();
         CommandHistoryContext CommandHistory();
         void UpdateWinGetSuggestions(Windows.Foundation.Collections.IVector<String> suggestions);
 

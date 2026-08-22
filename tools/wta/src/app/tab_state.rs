@@ -33,6 +33,23 @@ pub enum ToolCallKind {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActivityOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl AgentActivityOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallOutput {
     pub text: String,
@@ -433,6 +450,9 @@ pub struct TabSession {
     // Explicit per-turn lifecycle. Source of truth in the new state machine
     // (see `doc/specs/turn-state-refactor.md`).
     pub turn: TurnState,
+    pub activity_operation_id: u64,
+    pub activity_outcome: Option<AgentActivityOutcome>,
+    pub activity_summary: Option<String>,
     pub activity_frame: usize,
     /// Typewriter reveal cursor for the final assistant-text item in the
     /// active transcript. Advanced toward its full length by `RevealTick`

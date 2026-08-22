@@ -144,9 +144,14 @@ pub(crate) struct Cli {
     #[arg(long, hide = true)]
     pub(crate) owner_tab_id: Option<String>,
 
+    /// Stable WT pane GUID (the connection SessionId) for this helper's
+    /// Agent Pane. Terminal creates it before launching the helper so
+    /// outbound pane-local events never depend on best-effort discovery.
+    #[arg(long, hide = true)]
+    pub(crate) owner_pane_id: Option<String>,
+
     /// Window ID of the WT window that owns this helper. Passed alongside
-    /// `--owner-tab-id` because PID-based pane discovery is best-effort and
-    /// may not find a newly spawned ConPTY helper before `/agent` is used.
+    /// `--owner-tab-id` and `--owner-pane-id`.
     #[arg(long, hide = true)]
     pub(crate) owner_window_id: Option<String>,
 

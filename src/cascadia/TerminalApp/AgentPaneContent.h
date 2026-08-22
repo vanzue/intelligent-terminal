@@ -25,6 +25,14 @@ namespace winrt::TerminalApp::implementation
                                const winrt::hstring& model,
                                const winrt::hstring& state,
                                const winrt::hstring& backend);
+        void UpdateActivity(const winrt::hstring& phase,
+                            const winrt::hstring& outcome,
+                            const winrt::hstring& summary,
+                            uint64_t operationId);
+        winrt::hstring ActivityPhase() const noexcept { return _activityPhase; }
+        winrt::hstring ActivityOutcome() const noexcept { return _activityOutcome; }
+        winrt::hstring ActivitySummary() const noexcept { return _activitySummary; }
+        uint64_t ActivityOperationId() const noexcept { return _activityOperationId; }
 
         void SetSessionsView(bool active);
         // Whether the agent pane is currently displaying its sessions view
@@ -151,6 +159,10 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _agentModel{};
         winrt::hstring _agentState{};
         winrt::hstring _agentBackend{};
+        winrt::hstring _activityPhase{ L"idle" };
+        winrt::hstring _activityOutcome{};
+        winrt::hstring _activitySummary{};
+        uint64_t _activityOperationId{ 0 };
 
         // When true, the bar replaces "<agent> <version>" with "Agent sessions"
         // and hides the agent logo. Driven by TerminalPage::OnAgentStateChanged

@@ -53,6 +53,13 @@ impl App {
         );
         let is_autofix = prompt.autofix.is_some();
         let user_text = prompt.text.clone();
+        let activity_summary = if is_autofix {
+            Some("Automatic error analysis".to_string())
+        } else {
+            let normalized = prompt.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let truncated = normalized.chars().take(160).collect::<String>();
+            (!truncated.is_empty()).then_some(truncated)
+        };
         let tab = self.tab_mut(tab_id);
         // Per Decision #3, every Idle→Submitted transition explicitly clears
         // these orthogonal fields rather than relying on side effects from a
@@ -82,6 +89,9 @@ impl App {
         tab.activity_frame = 0;
         tab.timing_note = None;
         tab.turn = TurnState::Submitted(prompt);
+        tab.activity_operation_id = tab.turn.prompt().map(|prompt| prompt.id).unwrap_or(0);
+        tab.activity_outcome = None;
+        tab.activity_summary = activity_summary;
 
         // Submitting a new prompt dismisses any prior leftover card (the
         // `selected_recommendation = 0` + turn reset above). If the helper
@@ -376,6 +386,17 @@ impl App {
     /// 3. `Submitted` with no chunks — model returned nothing.
     /// 4. `Streaming` with a buffer — commit it as assistant text.
     pub fn turn_close(&mut self, session_id: &str) {
+        if let Some(operation_id) = self
+            .session_tab(session_id)
+            .turn
+            .prompt()
+            .map(|prompt| prompt.id)
+        {
+            let tab = self.session_tab_mut(session_id);
+            tab.activity_operation_id = operation_id;
+            tab.activity_outcome = Some(AgentActivityOutcome::Succeeded);
+        }
+
         // (1) Stale-autofix discard.
         let current_gen = self.session_tab(session_id).autofix.generation;
         if let Some(gen) = self.session_tab(session_id).turn.autofix_generation() {
@@ -388,6 +409,7 @@ impl App {
                 );
                 self.turn_clear_agent_activity(session_id);
                 let tab = self.session_tab_mut(session_id);
+                tab.activity_outcome = Some(AgentActivityOutcome::Cancelled);
                 tab.messages.clear();
                 tab.reveal_chars = 0;
                 tab.turn = TurnState::Idle;
@@ -745,6 +767,10 @@ impl App {
             self.emit_autofix_state_cleared(&target_tab);
         }
         let tab = self.session_tab_mut(session_id);
+        if let Some(operation_id) = tab.turn.prompt().map(|prompt| prompt.id) {
+            tab.activity_operation_id = operation_id;
+            tab.activity_outcome = Some(AgentActivityOutcome::Cancelled);
+        }
         tab.autofix.armed_at = None;
         let canceled_marker = t!("chat.turn_canceled").into_owned();
         // Three paths into cancel:

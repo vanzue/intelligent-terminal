@@ -328,6 +328,8 @@ namespace winrt::TerminalApp::implementation
         Windows::Foundation::Point _railSplitterStartPointer{};
         Windows::UI::Xaml::Controls::Grid _tabContent{ nullptr };
         Microsoft::UI::Xaml::Controls::SplitButton _newTabButton{ nullptr };
+        Windows::UI::Xaml::Controls::Button _activityCenterButton{ nullptr };
+        Windows::UI::Xaml::Controls::Flyout _activityCenterFlyout{ nullptr };
         Windows::UI::Xaml::Controls::MenuFlyout _workspaceFlyout{ nullptr };
         Windows::UI::Xaml::Controls::Button _workspaceDropdown{ nullptr };
         winrt::TerminalApp::ColorPickupFlyout _tabColorPicker{ nullptr };
@@ -487,28 +489,6 @@ namespace winrt::TerminalApp::implementation
         // _OnTabSelectionChanged once a terminal tab is active.
         bool _pendingAgentRebuild{ false };
 
-        // Plan-C resume-into-new-tab bookkeeping. When the session
-        // manager's Enter handler on a Historical/Ended row creates a
-        // new tab, it stashes the requested session id + cwd here keyed
-        // by the new tab's StableId. `OnAgentStateChanged` consumes the
-        // entry the moment it spawns the new helper for that tab —
-        // passing the values down as `--initial-load-session-id` +
-        // `--initial-load-cwd` so the boot-time ACP `session/load` is
-        // atomic with helper spawn. Replaces the prior race-prone
-        // "spawn helper, then broadcast `load_session` VT event" path
-        // (the VT broadcast often landed in the wrong helper because
-        // every helper subscribed to the same shared COM event stream).
-        //
-        // Entries are one-shot; an unconsumed entry leaks until the
-        // page is torn down (only happens if the user closes the new
-        // tab before its `agent_state_changed{pane_open:true}` round-
-        // trips back from wta). Tiny worst-case memory cost.
-        struct _PendingLoadSession
-        {
-            std::string sessionId;
-            std::string cwd;
-        };
-        std::unordered_map<winrt::hstring, _PendingLoadSession> _pendingLoadSessions;
         // Short-lived marks keyed by tab StableId: set whenever an agent
         // pane is torn down deliberately (Ctrl+C×2, settings rebuild,
         // /restart, recovery re-warm). `OnAgentPaneRestartRequested`
@@ -956,6 +936,7 @@ namespace winrt::TerminalApp::implementation
         void _PopulateContextMenu(const Microsoft::Terminal::Control::TermControl& control, const Microsoft::UI::Xaml::Controls::CommandBarFlyout& sender, const bool withSelection);
         void _PopulateQuickFixMenu(const Microsoft::Terminal::Control::TermControl& control, const Windows::UI::Xaml::Controls::MenuFlyout& sender);
         void _PopulateWorkspaceFlyout();
+        void _PopulateActivityCenterFlyout();
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _CreateRunAsAdminFlyout(int profileIndex);
 
         winrt::Microsoft::Terminal::Control::TermControl _senderOrActiveControl(const winrt::Windows::Foundation::IInspectable& sender);

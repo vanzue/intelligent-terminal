@@ -42,6 +42,9 @@
     <ClInclude Include="Pane.h">
       <Filter>pane</Filter>
     </ClInclude>
+    <ClInclude Include="PaneActivity.h">
+      <Filter>pane</Filter>
+    </ClInclude>
     <ClInclude Include="AppCommandlineArgs.h" />
     <ClInclude Include="Commandline.h" />
     <ClInclude Include="DebugTapConnection.h" />

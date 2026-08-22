@@ -21,6 +21,15 @@ namespace winrt::TerminalApp::implementation
         WINRT_OBSERVABLE_PROPERTY(uint32_t, ProgressValue, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, IsInputBroadcastActive, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Color, TabColorIndicator, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(bool, IsActivityIndicatorVisible, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(bool, IsActivityWorking, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(bool, IsActivityUpdate, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(bool, IsActivityError, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(bool, IsActivityActionRequired, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(bool, IsActivityCountVisible, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, ActivityCountText, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, ActivityAutomationName, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, ActivityTooltip, PropertyChanged.raise);
     };
 }
 

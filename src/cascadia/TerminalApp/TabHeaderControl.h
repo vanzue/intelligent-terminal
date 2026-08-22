@@ -16,11 +16,14 @@ namespace winrt::TerminalApp::implementation
 
         void RenameBoxLostFocusHandler(const winrt::Windows::Foundation::IInspectable& sender,
                                        const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
+        void _ActivityIndicatorClick(const winrt::Windows::Foundation::IInspectable& sender,
+                                     const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
 
         bool InRename();
 
         til::event<TerminalApp::TitleChangeRequestedArgs> TitleChangeRequested;
         til::typed_event<> RenameEnded;
+        til::typed_event<> ActivityIndicatorInvoked;
 
         til::property_changed_event PropertyChanged;
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);

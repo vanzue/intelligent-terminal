@@ -3813,6 +3813,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         return _core.ReadLastPrompt();
     }
+    hstring TermControl::ReadLastCommand() const
+    {
+        return _core.ReadLastCommand();
+    }
     Control::CommandHistoryContext TermControl::CommandHistory() const
     {
         return _core.CommandHistory();

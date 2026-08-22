@@ -55,6 +55,12 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    void TabHeaderControl::_ActivityIndicatorClick(const Windows::Foundation::IInspectable& /*sender*/,
+                                                   const Windows::UI::Xaml::RoutedEventArgs& /*e*/)
+    {
+        ActivityIndicatorInvoked.raise(*this, nullptr);
+    }
+
     // Method Description:
     // - Returns true if we're in the middle of a tab rename. This is used to
     //   mitigate GH#10112.

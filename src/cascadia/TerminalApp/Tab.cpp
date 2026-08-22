@@ -22,6 +22,7 @@ using namespace winrt::Microsoft::Terminal::TerminalConnection;
 using namespace winrt::Microsoft::Terminal::Settings::Model;
 using namespace winrt::Microsoft::UI::Xaml::Controls;
 using namespace winrt::Windows::System;
+namespace PaneActivity = ::TerminalApp::PaneActivity;
 
 namespace winrt
 {
@@ -109,6 +110,13 @@ namespace winrt::TerminalApp::implementation
             if (auto tab{ weakThis.get() })
             {
                 tab->RequestFocusActiveControl.raise();
+            }
+        });
+
+        _headerControl.ActivityIndicatorInvoked([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->_ActivityIndicatorInvoked();
             }
         });
 
@@ -1197,6 +1205,8 @@ namespace winrt::TerminalApp::implementation
             // and remove it from the map
             _contentEvents.erase(paneId);
         }
+        _paneActivityStates.erase(paneId);
+        _UpdateActivityState();
     }
 
     // Method Description:
@@ -1215,6 +1225,8 @@ namespace winrt::TerminalApp::implementation
         auto weakThis{ get_weak() };
         auto dispatcher = DispatcherQueue::GetForCurrentThread();
         ContentEventTokens events{};
+        auto& activity = _paneActivityStates[paneId];
+        PaneActivity::ApplySignal(activity, { PaneActivity::SignalKind::ConnectionReady });
 
         auto throttledTitleChanged = std::make_shared<ThrottledFunc<>>(
             dispatcher,
@@ -1242,10 +1254,38 @@ namespace winrt::TerminalApp::implementation
                 .delay = std::chrono::milliseconds{ 200 },
                 .trailing = true,
             },
-            [weakThis]() {
+            [weakThis, paneId]() {
                 if (const auto tab = weakThis.get())
                 {
                     tab->_UpdateProgressState();
+                    if (const auto pane = tab->_rootPane->FindPane(paneId))
+                    {
+                        const auto paneContent = pane->GetContent();
+                        PaneActivity::Signal signal{ PaneActivity::SignalKind::ProgressChanged };
+                        signal.observed = tab->_IsPaneObserved(paneId);
+                        const auto progressState = paneContent.TaskbarState();
+                        signal.progressValue = gsl::narrow<uint32_t>(paneContent.TaskbarProgress());
+                        switch (progressState)
+                        {
+                        case 1:
+                            signal.progressState = PaneActivity::ProgressState::Percent;
+                            break;
+                        case 3:
+                            signal.progressState = PaneActivity::ProgressState::Indeterminate;
+                            break;
+                        case 4:
+                            signal.progressState = PaneActivity::ProgressState::Paused;
+                            break;
+                        case 2:
+                            signal.kind = PaneActivity::SignalKind::OperationFinished;
+                            signal.outcome = PaneActivity::Outcome::Failed;
+                            break;
+                        default:
+                            signal.progressState = PaneActivity::ProgressState::None;
+                            break;
+                        }
+                        tab->_ApplyPaneActivitySignal(paneId, signal);
+                    }
                 }
             });
 
@@ -1272,12 +1312,27 @@ namespace winrt::TerminalApp::implementation
 
         events.ConnectionStateChanged = content.ConnectionStateChanged(
             winrt::auto_revoke,
-            [dispatcher, weakThis](auto&&, auto&&) -> safe_void_coroutine {
+            [dispatcher, weakThis, paneId](auto&&, auto&&) -> safe_void_coroutine {
                 const auto weakThisCopy = weakThis;
                 co_await wil::resume_foreground(dispatcher);
                 if (auto tab{ weakThisCopy.get() })
                 {
                     tab->_UpdateConnectionClosedState();
+                    if (const auto pane = tab->_rootPane->FindPane(paneId))
+                    {
+                        PaneActivity::Signal signal;
+                        if (const auto control = pane->GetTerminalControl();
+                            control && control.ConnectionState() >= ConnectionState::Closed)
+                        {
+                            signal.kind = PaneActivity::SignalKind::ConnectionClosed;
+                            signal.summary = RS_(L"NoticeError");
+                        }
+                        else
+                        {
+                            signal.kind = PaneActivity::SignalKind::ConnectionReady;
+                        }
+                        tab->_ApplyPaneActivitySignal(paneId, signal);
+                    }
                 }
             });
 
@@ -1308,7 +1363,7 @@ namespace winrt::TerminalApp::implementation
 
         events.BellRequested = content.BellRequested(
             winrt::auto_revoke,
-            [dispatcher, weakThis](TerminalApp::IPaneContent sender, auto bellArgs) -> safe_void_coroutine {
+            [dispatcher, weakThis, paneId](TerminalApp::IPaneContent sender, auto bellArgs) -> safe_void_coroutine {
                 const auto weakThisCopy = weakThis;
                 co_await wil::resume_foreground(dispatcher);
                 if (const auto tab{ weakThisCopy.get() })
@@ -1330,6 +1385,9 @@ namespace winrt::TerminalApp::implementation
 
                     // Show the bell indicator in the tab header
                     tab->ShowBellIndicator(true);
+                    PaneActivity::Signal activitySignal{ PaneActivity::SignalKind::Bell };
+                    activitySignal.observed = tab->_IsPaneObserved(paneId);
+                    tab->_ApplyPaneActivitySignal(paneId, activitySignal);
 
                     // If this tab is focused, activate the bell indicator timer, which will
                     // remove the bell indicator once it fires
@@ -1344,6 +1402,126 @@ namespace winrt::TerminalApp::implementation
         if (const auto& terminal{ content.try_as<TerminalApp::TerminalPaneContent>() })
         {
             events.RestartTerminalRequested = terminal.RestartTerminalRequested(winrt::auto_revoke, { get_weak(), &Tab::_bubbleRestartTerminalRequested });
+        }
+
+        TermControl termControl{ nullptr };
+        if (const auto terminal = content.try_as<TerminalApp::TerminalPaneContent>())
+        {
+            termControl = terminal.GetTermControl();
+        }
+        else if (const auto agent = content.try_as<TerminalApp::AgentPaneContent>())
+        {
+            termControl = agent.GetTermControl();
+            events.AgentStateChanged = agent.StateChanged(
+                winrt::auto_revoke,
+                [dispatcher, weakThis, paneId](auto&&, auto&&) -> safe_void_coroutine {
+                    const auto weakThisCopy = weakThis;
+                    co_await wil::resume_foreground(dispatcher);
+                    if (const auto tab = weakThisCopy.get())
+                    {
+                        if (const auto pane = tab->_rootPane->FindPane(paneId))
+                        {
+                            if (const auto agentContent = pane->GetContent().try_as<TerminalApp::AgentPaneContent>())
+                            {
+                                tab->_ApplyAgentActivity(paneId, agentContent);
+                            }
+                        }
+                    }
+                });
+            _ApplyAgentActivity(paneId, agent);
+        }
+
+        if (termControl)
+        {
+            if (termControl.ConnectionState() >= ConnectionState::Closed)
+            {
+                PaneActivity::Signal signal{ PaneActivity::SignalKind::ConnectionClosed };
+                signal.summary = RS_(L"NoticeError");
+                PaneActivity::ApplySignal(activity, signal);
+            }
+            events.VtSequenceReceived = termControl.VtSequenceReceived(
+                winrt::auto_revoke,
+                [dispatcher, weakThis, paneId](auto&&, const winrt::hstring& sequence) -> safe_void_coroutine {
+                    const auto sequenceCopy = sequence;
+                    const auto weakThisCopy = weakThis;
+                    co_await wil::resume_foreground(dispatcher);
+                    if (const auto tab = weakThisCopy.get())
+                    {
+                        const std::wstring_view value{ sequenceCopy };
+                        PaneActivity::Signal signal;
+                        if (value == L"osc:133;A")
+                        {
+                            signal.kind = PaneActivity::SignalKind::PromptStarted;
+                        }
+                        else if (value == L"osc:133;B")
+                        {
+                            signal.kind = PaneActivity::SignalKind::InputStarted;
+                        }
+                        else if (value == L"osc:133;C")
+                        {
+                            signal.kind = PaneActivity::SignalKind::OperationStarted;
+                            signal.operationKind = PaneActivity::OperationKind::Shell;
+                        }
+                        else if (value.starts_with(L"osc:133;D;"))
+                        {
+                            signal.kind = PaneActivity::SignalKind::OperationFinished;
+                            constexpr std::wstring_view prefix{ L"osc:133;D;" };
+                            const auto codeText = value.substr(prefix.size());
+                            uint64_t parsedCode = 0;
+                            bool validCode = !codeText.empty();
+                            for (const auto ch : codeText)
+                            {
+                                if (ch < L'0' || ch > L'9' || parsedCode > (UINT32_MAX - (ch - L'0')) / 10)
+                                {
+                                    validCode = false;
+                                    break;
+                                }
+                                parsedCode = parsedCode * 10 + (ch - L'0');
+                            }
+                            signal.exitCode = validCode ? std::optional<uint32_t>{ static_cast<uint32_t>(parsedCode) } :
+                                                          std::optional<uint32_t>{ UINT32_MAX };
+                            signal.outcome = signal.exitCode == uint32_t{ 0 } ? PaneActivity::Outcome::Succeeded : PaneActivity::Outcome::Failed;
+                            signal.observed = tab->_IsPaneObserved(paneId);
+                            if (const auto pane = tab->_rootPane ? tab->_rootPane->FindPane(paneId) : nullptr)
+                            {
+                                if (const auto control = pane->GetTerminalControl())
+                                {
+                                    auto command = std::wstring{ control.ReadLastCommand() };
+                                    std::wstring normalized;
+                                    normalized.reserve(std::min<size_t>(command.size(), 240));
+                                    bool previousWasWhitespace = false;
+                                    for (const auto ch : command)
+                                    {
+                                        const auto whitespace = ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+                                        if (whitespace)
+                                        {
+                                            if (!normalized.empty() && !previousWasWhitespace)
+                                            {
+                                                normalized.push_back(L' ');
+                                            }
+                                        }
+                                        else
+                                        {
+                                            normalized.push_back(ch);
+                                        }
+                                        previousWasWhitespace = whitespace;
+                                        if (normalized.size() == 240)
+                                        {
+                                            normalized.replace(237, 3, L"...");
+                                            break;
+                                        }
+                                    }
+                                    signal.command = std::move(normalized);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            co_return;
+                        }
+                        tab->_ApplyPaneActivitySignal(paneId, signal);
+                    }
+                });
         }
 
         events.NotificationRequested = content.NotificationRequested(
@@ -1367,6 +1545,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         _contentEvents[paneId] = std::move(events);
+        _UpdateActivityState();
     }
 
     // Method Description:
@@ -1442,6 +1621,201 @@ namespace winrt::TerminalApp::implementation
 
         // fire an event signaling that our taskbar progress changed.
         TaskbarProgressChanged.raise(nullptr, nullptr);
+    }
+
+    void Tab::_ApplyPaneActivitySignal(const uint32_t paneId, const PaneActivity::Signal& signal)
+    {
+        ASSERT_UI_THREAD();
+        const auto state = _paneActivityStates.find(paneId);
+        if (state == _paneActivityStates.end())
+        {
+            return;
+        }
+        PaneActivity::ApplySignal(state->second, signal);
+        _UpdateActivityState();
+    }
+
+    void Tab::_ApplyAgentActivity(const uint32_t paneId, const TerminalApp::AgentPaneContent& content)
+    {
+        ASSERT_UI_THREAD();
+        const auto state = _paneActivityStates.find(paneId);
+        if (state == _paneActivityStates.end())
+        {
+            return;
+        }
+
+        const auto phase = content.ActivityPhase();
+        const auto operationId = content.ActivityOperationId();
+        const auto summary = std::wstring{ content.ActivitySummary() };
+        if (phase == L"working")
+        {
+            if (!state->second.hasOperation || state->second.operationKind != PaneActivity::OperationKind::Agent || state->second.operationId != operationId)
+            {
+                PaneActivity::Signal signal{ PaneActivity::SignalKind::OperationStarted, PaneActivity::OperationKind::Agent };
+                signal.operationId = operationId;
+                signal.summary = summary;
+                _ApplyPaneActivitySignal(paneId, signal);
+            }
+            else if (state->second.phase == PaneActivity::Phase::Waiting)
+            {
+                _ApplyPaneActivitySignal(paneId, { PaneActivity::SignalKind::OperationResumed, PaneActivity::OperationKind::Agent });
+            }
+        }
+        else if (phase == L"waiting")
+        {
+            PaneActivity::Signal signal{ PaneActivity::SignalKind::OperationWaiting, PaneActivity::OperationKind::Agent };
+            signal.operationId = operationId;
+            signal.summary = summary;
+            _ApplyPaneActivitySignal(paneId, signal);
+        }
+        else if (phase == L"idle" && state->second.hasOperation && state->second.operationKind == PaneActivity::OperationKind::Agent)
+        {
+            PaneActivity::Signal signal{ PaneActivity::SignalKind::OperationFinished, PaneActivity::OperationKind::Agent };
+            const auto outcome = content.ActivityOutcome();
+            signal.outcome = outcome == L"failed" ? PaneActivity::Outcome::Failed :
+                             outcome == L"cancelled" ? PaneActivity::Outcome::Cancelled :
+                                                      PaneActivity::Outcome::Succeeded;
+            signal.operationId = operationId;
+            signal.observed = _IsPaneObserved(paneId);
+            signal.summary = summary;
+            _ApplyPaneActivitySignal(paneId, signal);
+        }
+    }
+
+    void Tab::_UpdateActivityState()
+    {
+        ASSERT_UI_THREAD();
+
+        std::vector<PaneActivity::PaneState> panes;
+        panes.reserve(_paneActivityStates.size());
+        for (const auto& [paneId, state] : _paneActivityStates)
+        {
+            panes.emplace_back(PaneActivity::PaneState{ paneId, state });
+        }
+
+        const auto activePaneId = _activePane && _activePane->Id() ? _activePane->Id().value() : 0;
+        _tabActivity = PaneActivity::AggregateStates(panes, activePaneId);
+
+        const auto dominant = _paneActivityStates.find(_tabActivity.dominantPaneId);
+        const auto dominantHasProgress = dominant != _paneActivityStates.end() &&
+                                         dominant->second.progressState != PaneActivity::ProgressState::None;
+        const auto actionRequired = _tabActivity.attention == PaneActivity::Attention::ActionRequired;
+        const auto error = _tabActivity.attention == PaneActivity::Attention::Error;
+        const auto update = _tabActivity.attention == PaneActivity::Attention::Update;
+        const auto working = _tabActivity.attention == PaneActivity::Attention::None &&
+                             _tabActivity.phase == PaneActivity::Phase::Working &&
+                             !dominantHasProgress;
+        const auto visible = actionRequired || error || update || working;
+
+        _tabStatus.IsActivityIndicatorVisible(visible);
+        _tabStatus.IsActivityWorking(working);
+        _tabStatus.IsActivityUpdate(update);
+        _tabStatus.IsActivityError(error);
+        _tabStatus.IsActivityActionRequired(actionRequired);
+        _tabStatus.IsActivityCountVisible(visible && _tabActivity.activePaneCount > 1);
+        _tabStatus.ActivityCountText(_tabActivity.activePaneCount > 1 ? winrt::to_hstring(_tabActivity.activePaneCount) : L"");
+
+        auto text = RS_fmt(L"NotificationMessage_TabActivity", GetTabText());
+        if (error)
+        {
+            text = fmt::format(L"{}: {}", RS_(L"NoticeError"), text);
+        }
+        if (!_tabActivity.summary.empty())
+        {
+            text += L": ";
+            text += _tabActivity.summary;
+        }
+
+        _tabStatus.ActivityAutomationName(text);
+        _tabStatus.ActivityTooltip(text);
+    }
+
+    void Tab::_ActivityIndicatorInvoked()
+    {
+        ASSERT_UI_THREAD();
+        if (_tabActivity.dominantPaneId != 0)
+        {
+            ActivateActivityPane(_tabActivity.dominantPaneId);
+        }
+    }
+
+    std::vector<PaneActivityEntry> Tab::ActivityEntries() const
+    {
+        std::vector<PaneActivityEntry> result;
+        for (const auto& [paneId, state] : _paneActivityStates)
+        {
+            if (state.phase == PaneActivity::Phase::Working ||
+                state.phase == PaneActivity::Phase::Waiting ||
+                state.attention != PaneActivity::Attention::None)
+            {
+                PaneActivityEntry entry{
+                    .paneId = paneId,
+                    .phase = state.phase,
+                    .attention = state.attention,
+                    .availability = state.availability,
+                    .lastOutcome = state.lastOutcome,
+                    .operationKind = state.operationKind != PaneActivity::OperationKind::None ?
+                                         state.operationKind :
+                                         state.lastOperationKind,
+                    .progressState = state.progressState,
+                    .progressValue = state.progressValue,
+                    .revision = state.revision,
+                    .summary = state.summary,
+                    .lastCommand = state.lastCommand,
+                    .lastExitCode = state.lastExitCode,
+                };
+                if (const auto pane = _rootPane ? _rootPane->FindPane(paneId) : nullptr)
+                {
+                    entry.hidden = pane->IsHidden();
+                    if (const auto content = pane->GetContent())
+                    {
+                        entry.paneTitle = content.Title();
+                    }
+                    if (const auto control = pane->GetTerminalControl())
+                    {
+                        entry.workingDirectory = control.WorkingDirectory();
+                    }
+                }
+                result.emplace_back(std::move(entry));
+            }
+        }
+        return result;
+    }
+
+    void Tab::ActivateActivityPane(const uint32_t paneId)
+    {
+        ASSERT_UI_THREAD();
+        TabViewItem().IsSelected(true);
+        if (const auto pane = _rootPane ? _rootPane->FindPane(paneId) : nullptr)
+        {
+            if (pane->IsHidden())
+            {
+                if (pane->GetContent().try_as<TerminalApp::AgentPaneContent>())
+                {
+                    RestoreStashedAgentPane(SplitDirection::Automatic);
+                }
+                else if (_hiddenPane == pane)
+                {
+                    ShowPane();
+                }
+            }
+            FocusPane(paneId);
+            _ApplyPaneActivitySignal(paneId, { PaneActivity::SignalKind::Observed });
+        }
+        RequestFocusActiveControl.raise();
+    }
+
+    bool Tab::_IsPaneObserved(const uint32_t paneId) const
+    {
+        if (!_focused() || !_rootPane)
+        {
+            return false;
+        }
+        const auto pane = _rootPane->FindPane(paneId);
+        return pane && PaneActivity::IsPaneObserved(true,
+                                                    paneId,
+                                                    _activePane ? _activePane->Id() : std::nullopt,
+                                                    pane->IsHidden());
     }
 
     // Method Description:
@@ -1665,6 +2039,19 @@ namespace winrt::TerminalApp::implementation
                 if (tab->_tabStatus.BellIndicator())
                 {
                     tab->ShowBellIndicator(false);
+                }
+                std::vector<uint32_t> observedPanes;
+                observedPanes.reserve(tab->_paneActivityStates.size());
+                for (const auto& [paneId, _] : tab->_paneActivityStates)
+                {
+                    if (tab->_IsPaneObserved(paneId))
+                    {
+                        observedPanes.emplace_back(paneId);
+                    }
+                }
+                for (const auto paneId : observedPanes)
+                {
+                    tab->_ApplyPaneActivitySignal(paneId, { PaneActivity::SignalKind::Observed });
                 }
             }
         });

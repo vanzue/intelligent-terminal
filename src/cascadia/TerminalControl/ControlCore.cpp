@@ -2509,6 +2509,31 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return {};
     }
 
+    hstring ControlCore::ReadLastCommand() const
+    {
+        const auto lock = _terminal->LockForReading();
+        const auto& marks = _terminal->GetMarkExtents();
+        const auto& textBuffer = _terminal->GetTextBuffer();
+
+        for (auto it = marks.rbegin(); it != marks.rend(); ++it)
+        {
+            if (!it->HasCommand() || !it->data.exitCode.has_value())
+            {
+                continue;
+            }
+
+            auto command = textBuffer.GetPlainText(it->end, *it->commandEnd);
+            if (const auto end = command.find_last_not_of(L" \t\r\n"); end != std::wstring::npos)
+            {
+                command.resize(end + 1);
+                return hstring{ command };
+            }
+            return {};
+        }
+
+        return {};
+    }
+
     // Get all of our recent commands. This will only really work if the user has enabled shell integration.
     Control::CommandHistoryContext ControlCore::CommandHistory() const
     {

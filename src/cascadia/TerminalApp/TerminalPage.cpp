@@ -70,6 +70,32 @@ using namespace std::chrono_literals;
 static constexpr double railMin = 180.0;
 static constexpr double railMax = 480.0;
 
+static std::optional<winrt::guid> _parseProtocolPaneId(const Json::Value& params)
+{
+    if (!params.isMember("pane_id") || !params["pane_id"].isString())
+    {
+        return std::nullopt;
+    }
+
+    const auto raw = params["pane_id"].asString();
+    if (raw.empty())
+    {
+        return std::nullopt;
+    }
+
+    const auto wide = winrt::to_hstring(raw);
+    try
+    {
+        return raw.front() == '{' ?
+                   winrt::guid{ ::Microsoft::Console::Utils::GuidFromString(wide.c_str()) } :
+                   winrt::guid{ ::Microsoft::Console::Utils::GuidFromPlainString(wide.c_str()) };
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+}
+
 #define HOOKUP_ACTION(action) _actionDispatch->action({ this, &TerminalPage::_Handle##action });
 
 namespace winrt
@@ -465,8 +491,22 @@ namespace winrt::TerminalApp::implementation
 
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();
+        _activityCenterButton = tabRowImpl->ActivityCenterButton();
         _workspaceFlyout = tabRowImpl->WorkspaceFlyout();
         _workspaceDropdown = tabRowImpl->WorkspaceDropdown();
+
+        _activityCenterFlyout = WUX::Controls::Flyout{};
+        _activityCenterFlyout.Placement(WUX::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedRight);
+        _activityCenterFlyout.Opening([weakThis{ get_weak() }](auto&&, auto&&) {
+            if (auto page{ weakThis.get() })
+            {
+                page->_PopulateActivityCenterFlyout();
+            }
+        });
+        _activityCenterButton.Flyout(_activityCenterFlyout);
+        const auto activityCenterName = RS_fmt(L"NotificationMessage_TabActivity", L"\x2026");
+        WUX::Automation::AutomationProperties::SetName(_activityCenterButton, activityCenterName);
+        WUX::Controls::ToolTipService::SetToolTip(_activityCenterButton, box_value(activityCenterName));
 
         // Set the initial workspace name from the window name.
         // Use raw WindowName() so unnamed windows show no text.
@@ -2326,6 +2366,9 @@ namespace winrt::TerminalApp::implementation
             _agentPaneLog("_AutoCreateHiddenAgentPaneShared: tab has no StableId");
             return false;
         }
+        const auto paneSessionId = ::Microsoft::Console::Utils::CreateGuid();
+        const auto paneSessionIdString =
+            ::Microsoft::Console::Utils::GuidToPlainString(paneSessionId);
 
         // Build the wta-helper cmdline. The helper is a normal conpty
         // child; it connects to the master pipe and speaks ACP JSON-RPC.
@@ -2339,6 +2382,7 @@ namespace winrt::TerminalApp::implementation
         helperCmd.push_back(L'"');
         helperCmd.append(L" --connect-master \"").append(masterPipeName).append(L"\"");
         helperCmd.append(L" --owner-tab-id \"").append(std::wstring_view{ stableId }).append(L"\"");
+        helperCmd.append(L" --owner-pane-id \"").append(paneSessionIdString).append(L"\"");
         helperCmd.append(L" --owner-window-id \"").append(std::to_wstring(_WindowProperties.WindowId())).append(L"\"");
 
         // If master is degraded (died unexpectedly, not yet recovered via
@@ -2524,6 +2568,7 @@ namespace winrt::TerminalApp::implementation
         NewTerminalArgs args;
         args.Commandline(winrt::hstring{ helperCmd });
         args.Profile(globals.AiCoordinatorProfile());
+        args.SessionId(paneSessionId);
         if (!startingDirectory.empty())
         {
             args.StartingDirectory(startingDirectory);
@@ -5101,8 +5146,36 @@ namespace winrt::TerminalApp::implementation
         const auto state = pickStr("state");
         const auto backend = pickStr("backend");
         const auto statusTabId = pickStr("tab_id");
+        const auto statusPaneId = _parseProtocolPaneId(params);
 
         _agentPaneLog("OnAgentStatusChanged: payload=" + winrt::to_string(eventJson).substr(0, 600));
+
+        winrt::TerminalApp::AgentPaneContent statusTargetContent{ nullptr };
+        if (!statusTabId.empty())
+        {
+            if (!statusPaneId)
+            {
+                _agentPaneLog("OnAgentStatusChanged: missing or invalid pane_id, dropping pane-local status");
+                return;
+            }
+            const auto statusTab = _FindTabByStableId(statusTabId);
+            if (!statusTab)
+            {
+                return;
+            }
+            if (const auto root = statusTab->GetRootPane())
+            {
+                if (const auto pane = root->FindPaneBySessionId(*statusPaneId))
+                {
+                    statusTargetContent = pane->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>();
+                }
+            }
+            if (!statusTargetContent)
+            {
+                _agentPaneLog("OnAgentStatusChanged: pane_id does not identify an Agent Pane in tab, dropping");
+                return;
+            }
+        }
 
         // If WTA signals a new agent selection (e.g. from FRE or preflight),
         // persist it to settings so the next launch uses the same agent.
@@ -5217,28 +5290,26 @@ namespace winrt::TerminalApp::implementation
             _RaiseProtocolEvent("agent_config_changed", config);
         }
 
-        // Route by tab_id when present; otherwise fan out to every
-        // agent pane in this window (e.g. settings broadcasts).
+        // Pane-local status must carry both identities. A mismatched pane is
+        // rejected instead of falling back to whichever Agent Pane happens
+        // to be in the tab.
         const auto tabId = statusTabId;
-        const auto update = [&](const winrt::com_ptr<Tab>& tabImpl) {
-            if (const auto content = tabImpl->FindAgentPaneContent())
-            {
-                content.UpdateAgentStatus(name, version, model, state, backend);
-            }
-        };
         if (!tabId.empty())
         {
-            if (const auto tab = _FindTabByStableId(tabId))
-            {
-                update(tab);
-            }
+            statusTargetContent.UpdateAgentStatus(name, version, model, state, backend);
             return;
         }
+
+        // Broadcast status without a tab identity is retained for settings
+        // and other process-wide refreshes.
         for (const auto& t : _tabs)
         {
             if (auto tabImpl = _GetTabImpl(t))
             {
-                update(tabImpl);
+                if (const auto content = tabImpl->FindAgentPaneContent())
+                {
+                    content.UpdateAgentStatus(name, version, model, state, backend);
+                }
             }
         }
     }
@@ -5304,8 +5375,25 @@ namespace winrt::TerminalApp::implementation
             // Tab is unknown in this window — likely belongs to another window.
             return;
         }
+        const auto paneSessionId = _parseProtocolPaneId(params);
+        if (!paneSessionId)
+        {
+            _agentPaneLog("OnAgentStateChanged: missing or invalid pane_id, dropping");
+            return;
+        }
+        const auto rootPane = targetTab->GetRootPane();
+        const auto agentPane = rootPane ? rootPane->FindPaneBySessionId(*paneSessionId) : nullptr;
+        const auto agentContent = agentPane && agentPane->GetContent() ?
+                                      agentPane->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>() :
+                                      nullptr;
+        if (!agentContent)
+        {
+            _agentPaneLog("OnAgentStateChanged: pane_id does not identify an Agent Pane in tab, dropping");
+            return;
+        }
 
-        std::string logSuffix = " tab_id=" + winrt::to_string(tabId);
+        std::string logSuffix = " tab_id=" + winrt::to_string(tabId) +
+                                " pane_id=" + params["pane_id"].asString();
 
         std::optional<bool> wantOpen;
         if (params.isMember("pane_open") && params["pane_open"].isBool())
@@ -5348,6 +5436,37 @@ namespace winrt::TerminalApp::implementation
                          value.isObject() ? " usage=present" :
                                             " usage=invalid";
         }
+        struct ActivitySnapshot
+        {
+            winrt::hstring phase;
+            winrt::hstring outcome;
+            winrt::hstring summary;
+            uint64_t operationId{ 0 };
+        };
+        std::optional<ActivitySnapshot> activity;
+        if (params.isMember("activity") && params["activity"].isObject())
+        {
+            const auto& value = params["activity"];
+            if (value.isMember("phase") && value["phase"].isString())
+            {
+                ActivitySnapshot snapshot;
+                snapshot.phase = winrt::to_hstring(value["phase"].asString());
+                if (value.isMember("outcome") && value["outcome"].isString())
+                {
+                    snapshot.outcome = winrt::to_hstring(value["outcome"].asString());
+                }
+                if (value.isMember("summary") && value["summary"].isString())
+                {
+                    snapshot.summary = winrt::to_hstring(value["summary"].asString());
+                }
+                if (value.isMember("operation_id") && value["operation_id"].isUInt64())
+                {
+                    snapshot.operationId = value["operation_id"].asUInt64();
+                }
+                activity = std::move(snapshot);
+                logSuffix += " activity=" + value["phase"].asString();
+            }
+        }
         _agentPaneLog(std::string{ "OnAgentStateChanged:" } + logSuffix);
 
         // Cache the WTA-owned runtime override on the Tab before applying
@@ -5361,10 +5480,7 @@ namespace winrt::TerminalApp::implementation
         // Apply view to the existing AgentPaneContent if any.
         if (view.has_value())
         {
-            if (const auto agentContent = targetTab->FindAgentPaneContent())
-            {
-                agentContent.SetSessionsView(*view == "sessions");
-            }
+            agentContent.SetSessionsView(*view == "sessions");
         }
 
         // Apply pane_open as detach/reattach (NOT destroy/recreate). On
@@ -5387,36 +5503,10 @@ namespace winrt::TerminalApp::implementation
                         targetTab->EffectiveAgentPanePosition(_settings.GlobalSettings().AgentPanePosition()));
                     targetTab->RestoreStashedAgentPane(splitDir);
                 }
-                else if (!targetTab->FindAgentPane())
-                {
-                    // No pane on this tab yet — first toggle-open is the
-                    // spawn path. View defaults to chat unless `view=sessions`.
-                    const bool intoSessions = view.has_value() && *view == "sessions";
-
-                    // Plan-C: consume any pending load-session hint for
-                    // this tab. Set by `OnResumeInNewAgentTabRequested`
-                    // when the user pressed Enter on a Historical/Ended
-                    // row in session management view — the new helper boots straight into a
-                    // `session/load` of the requested session id instead
-                    // of creating a fresh session. One-shot: the entry
-                    // is moved out and erased here so a later
-                    // `agent_state_changed` for the same tab (e.g. a
-                    // tab_changed echo) doesn't accidentally re-spawn.
-                    std::string pendingSid;
-                    std::string pendingCwd;
-                    if (const auto it = _pendingLoadSessions.find(tabId); it != _pendingLoadSessions.end())
-                    {
-                        pendingSid = std::move(it->second.sessionId);
-                        pendingCwd = std::move(it->second.cwd);
-                        _pendingLoadSessions.erase(it);
-                        _agentPaneLog("OnAgentStateChanged: consuming pending load_session for tab " + winrt::to_string(tabId));
-                    }
-                    _AutoCreateHiddenAgentPaneShared(targetTab, intoSessions, /*autoStash*/ false, pendingSid, pendingCwd);
-                }
             }
             else
             {
-                if (targetTab->FindAgentPane())
+                if (!agentPane->IsHidden())
                 {
                     // The agent pane is being hidden — drop any chip
                     // override so the chip doesn't stay pinned on a
@@ -5434,7 +5524,6 @@ namespace winrt::TerminalApp::implementation
         {
             const auto panePosition = targetTab->EffectiveAgentPanePosition(
                 _settings.GlobalSettings().AgentPanePosition());
-            const auto agentPane = targetTab->FindAgentPane();
             const auto focusedTab = _GetFocusedTabImpl();
             const bool restoreAgentFocus = agentPane &&
                                            !agentPane->IsHidden() &&
@@ -5446,28 +5535,25 @@ namespace winrt::TerminalApp::implementation
             {
                 repositioned = rootPane->RepositionAgentPane(_AgentPanePositionToSplitDirection(panePosition));
             }
-            if (const auto agentContent = targetTab->FindAgentPaneContent())
-            {
-                agentContent.SetAgentPanePosition(_AgentPanePositionToContentPosition(panePosition));
+            agentContent.SetAgentPanePosition(_AgentPanePositionToContentPosition(panePosition));
 
-                // RepositionAgentPane rebuilds the split's XAML visual tree,
-                // which clears focus. `/move` originates in this TermControl,
-                // so restore it after the next layout pass, but only if this
-                // pane was focused before the move.
-                if (repositioned && restoreAgentFocus)
+            // RepositionAgentPane rebuilds the split's XAML visual tree,
+            // which clears focus. `/move` originates in this TermControl,
+            // so restore it after the next layout pass, but only if this
+            // pane was focused before the move.
+            if (repositioned && restoreAgentFocus)
+            {
+                if (const auto termControl = agentContent.GetTermControl())
                 {
-                    if (const auto termControl = agentContent.GetTermControl())
+                    if (const auto dispatcher = DispatcherQueue::GetForCurrentThread())
                     {
-                        if (const auto dispatcher = DispatcherQueue::GetForCurrentThread())
-                        {
-                            const auto weakControl = winrt::make_weak(termControl);
-                            dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weakControl]() {
-                                if (const auto ctrl = weakControl.get())
-                                {
-                                    ctrl.Focus(FocusState::Programmatic);
-                                }
-                            });
-                        }
+                        const auto weakControl = winrt::make_weak(termControl);
+                        dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weakControl]() {
+                            if (const auto ctrl = weakControl.get())
+                            {
+                                ctrl.Focus(FocusState::Programmatic);
+                            }
+                        });
                     }
                 }
             }
@@ -5475,13 +5561,19 @@ namespace winrt::TerminalApp::implementation
 
         if (usage.has_value())
         {
-            if (const auto agentContent = targetTab->FindAgentPaneContent())
+            if (!winrt::get_self<implementation::AgentPaneContent>(agentContent)->ApplyAgentUsage(*usage))
             {
-                if (!winrt::get_self<implementation::AgentPaneContent>(agentContent)->ApplyAgentUsage(*usage))
-                {
-                    _agentPaneLog("OnAgentStateChanged: invalid usage hidden");
-                }
+                _agentPaneLog("OnAgentStateChanged: invalid usage hidden");
             }
+        }
+
+        if (activity.has_value())
+        {
+            agentContent.UpdateActivity(
+                activity->phase,
+                activity->outcome,
+                activity->summary,
+                activity->operationId);
         }
 
         // Bottom-bar catch-all. AgentPaneContent::SetSessionsView is idempotent
@@ -6004,20 +6096,13 @@ namespace winrt::TerminalApp::implementation
     // (Plan-C ResumeInAgentPane path). We:
     //   1. Create a new tab with the default profile (using the historical
     //      session's cwd as the starting directory when provided).
-    //   2. Stash the (session_id, cwd) in `_pendingLoadSessions` keyed by
-    //      the new tab's StableId.
-    //   3. Ask wta to mark the new tab's agent pane as open. wta echoes
-    //      `agent_state_changed{pane_open:true, tab_id:<new>}` which
-    //      lands in `OnAgentStateChanged`; the pending entry is consumed
-    //      there and passed to `_AutoCreateHiddenAgentPaneShared` so the
-    //      newly-spawned helper boots with `--initial-load-session-id`
-    //      (atomic spawn + `session/load` via main.rs Plan-C glue).
+    //   2. Spawn that tab's Agent Pane directly with the resume request
+    //      bundled as `--initial-load-session-id`.
     //
-    // No separate `load_session` VT broadcast — the prior design had a
-    // race where the broadcast often arrived at the WRONG helper because
-    // every helper subscribes to the same shared COM event stream and
-    // the new helper's pipe attach hadn't completed yet when the
-    // broadcast fired.
+    // This avoids using another helper's pane-local state projection as a
+    // control message for the new tab. Every `agent_state_changed` event can
+    // therefore require its own `tab_id + pane_id` identity without a
+    // cross-pane exception.
     //
     // The shared-agent-pane model means we can't actually have two
     // independent ACP connections on one window. If the running WTA was
@@ -6066,11 +6151,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // Step 2: register the pending load-session for the new tab and
-        // ask wta to mark it as having an open agent pane. The resulting
-        // `agent_state_changed{pane_open:true}` lands in
-        // `OnAgentStateChanged`, which consumes the pending entry and
-        // spawns the helper with the bundled resume request.
+        // Step 2: synchronously create the Agent Pane before the tab's
+        // deferred pre-warm runs. The deferred walk sees this pane and skips
+        // creating a second helper.
         const auto newTab = _GetFocusedTabImpl();
         if (!newTab)
         {
@@ -6083,10 +6166,16 @@ namespace winrt::TerminalApp::implementation
             _agentPaneLog("OnResumeInNewAgentTabRequested: new tab has empty StableId");
             return;
         }
-        _pendingLoadSessions[newStableId] = _PendingLoadSession{ sessionIdStr, cwdStr };
-        _agentPaneLog("OnResumeInNewAgentTabRequested: stashed pending load_session for tab " +
-                      winrt::to_string(newStableId) + " session_id=" + sessionIdStr);
-        _RequestAgentStateForTab(newTab, std::nullopt, /*pane_open*/ true);
+        if (!_AutoCreateHiddenAgentPaneShared(
+                newTab,
+                /*intoSessionsView*/ false,
+                /*autoStash*/ false,
+                sessionIdStr,
+                cwdStr))
+        {
+            _agentPaneLog("OnResumeInNewAgentTabRequested: failed to create resumed Agent Pane for tab " +
+                          winrt::to_string(newStableId));
+        }
     }
 
     // Method Description:
@@ -10891,6 +10980,245 @@ namespace winrt::TerminalApp::implementation
                 _workspaceFlyout.Items().Append(item);
             }
         }
+    }
+
+    void TerminalPage::_PopulateActivityCenterFlyout()
+    {
+        if (!_activityCenterFlyout)
+        {
+            return;
+        }
+
+        struct Item
+        {
+            winrt::hstring tabId;
+            winrt::hstring tabTitle;
+            PaneActivityEntry activity;
+        };
+
+        std::vector<Item> activities;
+        for (const auto& tab : _tabs)
+        {
+            const auto tabImpl = _GetTabImpl(tab);
+            if (!tabImpl)
+            {
+                continue;
+            }
+            for (auto&& activity : tabImpl->ActivityEntries())
+            {
+                activities.emplace_back(Item{
+                    tabImpl->StableId(),
+                    tabImpl->GetTabText(),
+                    std::move(activity) });
+            }
+        }
+
+        std::stable_sort(activities.begin(), activities.end(), [](const auto& lhs, const auto& rhs) {
+            const auto lhsAttention = ::TerminalApp::PaneActivity::AttentionPriority(lhs.activity.attention);
+            const auto rhsAttention = ::TerminalApp::PaneActivity::AttentionPriority(rhs.activity.attention);
+            if (lhsAttention != rhsAttention)
+            {
+                return lhsAttention > rhsAttention;
+            }
+            const auto lhsPhase = ::TerminalApp::PaneActivity::PhasePriority(lhs.activity.phase);
+            const auto rhsPhase = ::TerminalApp::PaneActivity::PhasePriority(rhs.activity.phase);
+            return lhsPhase != rhsPhase ?
+                       lhsPhase > rhsPhase :
+                       lhs.activity.revision > rhs.activity.revision;
+        });
+
+        WUX::Controls::StackPanel root;
+        const auto flyoutWidth = std::clamp(ActualWidth() - 48.0, 420.0, 680.0);
+        root.Width(flyoutWidth);
+        root.MaxHeight(500);
+        root.Spacing(6);
+
+        WUX::Controls::TextBlock heading;
+        heading.Text(L"Activity Center");
+        heading.FontSize(16);
+        heading.FontWeight(FontWeights::SemiBold());
+        root.Children().Append(heading);
+
+        if (activities.empty())
+        {
+            WUX::Controls::TextBlock empty;
+            empty.Text(RS_(L"NewTabMenuFolderEmpty"));
+            empty.Opacity(0.65);
+            empty.Margin(WUX::Thickness{ 0, 8, 0, 4 });
+            root.Children().Append(empty);
+            _activityCenterFlyout.Content(root);
+            return;
+        }
+
+        WUX::Controls::StackPanel cards;
+        cards.Spacing(4);
+
+        for (const auto& item : activities)
+        {
+            const auto status = item.activity.availability == ::TerminalApp::PaneActivity::Availability::Disconnected ? L"Disconnected" :
+                                item.activity.attention == ::TerminalApp::PaneActivity::Attention::ActionRequired      ? L"Action required" :
+                                item.activity.attention == ::TerminalApp::PaneActivity::Attention::Error               ? L"Failed" :
+                                item.activity.attention == ::TerminalApp::PaneActivity::Attention::Update              ? L"Completed" :
+                                item.activity.phase == ::TerminalApp::PaneActivity::Phase::Waiting                     ? L"Waiting" :
+                                                                                                                         L"Working";
+            const auto source = item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Agent       ? L"Agent" :
+                                item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Shell       ? L"Shell" :
+                                item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Application ? L"Application" :
+                                                                                                                         L"Terminal";
+            auto detail = item.activity.summary;
+            if (item.activity.lastOutcome == ::TerminalApp::PaneActivity::Outcome::Failed &&
+                item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Shell &&
+                !item.activity.lastCommand.empty())
+            {
+                detail = item.activity.lastCommand;
+            }
+            if (detail.empty())
+            {
+                detail = item.activity.attention == ::TerminalApp::PaneActivity::Attention::ActionRequired ? L"Waiting for input or approval" :
+                         item.activity.attention == ::TerminalApp::PaneActivity::Attention::Error          ? L"Open the pane to inspect the failure" :
+                                                                                                             item.activity.paneTitle;
+            }
+
+            WUX::Controls::Grid card;
+            card.MinHeight(56);
+            card.Padding(WUX::Thickness{ 10, 6, 10, 6 });
+            WUX::Controls::ColumnDefinition iconColumn;
+            iconColumn.Width(WUX::GridLengthHelper::FromPixels(24));
+            WUX::Controls::ColumnDefinition statusColumn;
+            statusColumn.Width(WUX::GridLengthHelper::FromPixels(flyoutWidth < 560 ? 96 : 108));
+            WUX::Controls::ColumnDefinition contextColumn;
+            contextColumn.Width(WUX::GridLengthHelper::FromPixels(flyoutWidth < 560 ? 160 : 200));
+            card.ColumnDefinitions().Append(iconColumn);
+            card.ColumnDefinitions().Append(statusColumn);
+            card.ColumnDefinitions().Append(WUX::Controls::ColumnDefinition{});
+            card.ColumnDefinitions().Append(contextColumn);
+
+            WUX::Controls::FontIcon icon;
+            icon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            icon.FontSize(14);
+            icon.VerticalAlignment(WUX::VerticalAlignment::Center);
+            icon.Glyph(item.activity.attention == ::TerminalApp::PaneActivity::Attention::ActionRequired ? L"\xE7BA" :
+                       item.activity.attention == ::TerminalApp::PaneActivity::Attention::Error          ? L"\xE783" :
+                       item.activity.attention == ::TerminalApp::PaneActivity::Attention::Update         ? L"\xE73E" :
+                                                                                                          L"\xE895");
+            card.Children().Append(icon);
+
+            WUX::Controls::StackPanel statusBlock;
+            statusBlock.Spacing(1);
+            statusBlock.VerticalAlignment(WUX::VerticalAlignment::Center);
+            WUX::Controls::Grid::SetColumn(statusBlock, 1);
+            WUX::Controls::TextBlock statusLine;
+            statusLine.Text(status);
+            statusLine.FontSize(13);
+            statusLine.FontWeight(FontWeights::SemiBold());
+            statusBlock.Children().Append(statusLine);
+            WUX::Controls::TextBlock sourceLine;
+            sourceLine.Text(source);
+            sourceLine.FontSize(11);
+            sourceLine.Opacity(0.65);
+            statusBlock.Children().Append(sourceLine);
+            card.Children().Append(statusBlock);
+
+            WUX::Controls::StackPanel taskBlock;
+            taskBlock.Spacing(1);
+            taskBlock.Margin(WUX::Thickness{ 6, 0, 12, 0 });
+            taskBlock.VerticalAlignment(WUX::VerticalAlignment::Center);
+            WUX::Controls::Grid::SetColumn(taskBlock, 2);
+            WUX::Controls::TextBlock detailLine;
+            detailLine.Text(detail);
+            detailLine.FontSize(13);
+            detailLine.FontWeight(FontWeights::SemiBold());
+            detailLine.TextTrimming(WUX::TextTrimming::CharacterEllipsis);
+            taskBlock.Children().Append(detailLine);
+
+            if (item.activity.lastOutcome == ::TerminalApp::PaneActivity::Outcome::Failed &&
+                item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Shell &&
+                item.activity.lastExitCode.has_value())
+            {
+                WUX::Controls::TextBlock exitCode;
+                exitCode.Text(*item.activity.lastExitCode == UINT32_MAX ?
+                                  L"Exit code unavailable" :
+                                  fmt::format(L"Exit code {}", *item.activity.lastExitCode));
+                exitCode.FontSize(11);
+                exitCode.Opacity(0.65);
+                taskBlock.Children().Append(exitCode);
+            }
+            else if (!item.activity.summary.empty() &&
+                !item.activity.paneTitle.empty() &&
+                item.activity.paneTitle != item.activity.summary)
+            {
+                WUX::Controls::TextBlock paneTitle;
+                paneTitle.Text(item.activity.paneTitle);
+                paneTitle.FontSize(11);
+                paneTitle.Opacity(0.65);
+                paneTitle.TextTrimming(WUX::TextTrimming::CharacterEllipsis);
+                taskBlock.Children().Append(paneTitle);
+            }
+            if (item.activity.operationKind == ::TerminalApp::PaneActivity::OperationKind::Application &&
+                (item.activity.progressState == ::TerminalApp::PaneActivity::ProgressState::Percent ||
+                 item.activity.progressState == ::TerminalApp::PaneActivity::ProgressState::Paused))
+            {
+                WUX::Controls::ProgressBar progress;
+                progress.Margin(WUX::Thickness{ 0, 3, 0, 0 });
+                progress.Value(item.activity.progressValue);
+                taskBlock.Children().Append(progress);
+            }
+            card.Children().Append(taskBlock);
+
+            WUX::Controls::StackPanel contextBlock;
+            contextBlock.Spacing(1);
+            contextBlock.VerticalAlignment(WUX::VerticalAlignment::Center);
+            WUX::Controls::Grid::SetColumn(contextBlock, 3);
+            WUX::Controls::TextBlock locationLine;
+            const auto location = item.tabTitle.empty() ?
+                                      fmt::format(L"#{}{}", item.activity.paneId + 1, item.activity.hidden ? L" \x00B7 hidden" : L"") :
+                                      fmt::format(L"{} \x00B7 #{}{}", item.tabTitle, item.activity.paneId + 1, item.activity.hidden ? L" \x00B7 hidden" : L"");
+            locationLine.Text(location);
+            locationLine.FontSize(12);
+            locationLine.TextTrimming(WUX::TextTrimming::CharacterEllipsis);
+            contextBlock.Children().Append(locationLine);
+            if (!item.activity.workingDirectory.empty())
+            {
+                WUX::Controls::TextBlock cwd;
+                cwd.Text(item.activity.workingDirectory);
+                cwd.FontFamily(WUX::Media::FontFamily{ L"Cascadia Mono, Consolas" });
+                cwd.FontSize(11);
+                cwd.Opacity(0.6);
+                cwd.TextTrimming(WUX::TextTrimming::CharacterEllipsis);
+                contextBlock.Children().Append(cwd);
+            }
+            card.Children().Append(contextBlock);
+
+            WUX::Controls::Button cardButton;
+            cardButton.HorizontalContentAlignment(WUX::HorizontalAlignment::Stretch);
+            cardButton.HorizontalAlignment(WUX::HorizontalAlignment::Stretch);
+            cardButton.Padding(WUX::Thickness{});
+            cardButton.Content(card);
+
+            const auto tabId = item.tabId;
+            const auto paneId = item.activity.paneId;
+            cardButton.Click([weakThis = get_weak(), tabId, paneId](auto&&, auto&&) {
+                if (const auto page = weakThis.get())
+                {
+                    page->_activityCenterFlyout.Hide();
+                    if (const auto tab = page->_FindTabByStableId(tabId))
+                    {
+                        tab->ActivateActivityPane(paneId);
+                    }
+                }
+            });
+            cards.Children().Append(cardButton);
+        }
+
+        WUX::Controls::ScrollViewer scrollViewer;
+        scrollViewer.HorizontalScrollBarVisibility(WUX::Controls::ScrollBarVisibility::Disabled);
+        scrollViewer.HorizontalScrollMode(WUX::Controls::ScrollMode::Disabled);
+        scrollViewer.VerticalScrollBarVisibility(WUX::Controls::ScrollBarVisibility::Auto);
+        scrollViewer.VerticalScrollMode(WUX::Controls::ScrollMode::Auto);
+        scrollViewer.MaxHeight(430);
+        scrollViewer.Content(cards);
+        root.Children().Append(scrollViewer);
+        _activityCenterFlyout.Content(root);
     }
 
     // Handler for our WindowProperties's PropertyChanged event. We'll use this

@@ -111,6 +111,26 @@ namespace winrt::TerminalApp::implementation
         StateChanged.raise(*this, nullptr);
     }
 
+    void AgentPaneContent::UpdateActivity(const winrt::hstring& phase,
+                                          const winrt::hstring& outcome,
+                                          const winrt::hstring& summary,
+                                          const uint64_t operationId)
+    {
+        if (_activityPhase == phase &&
+            _activityOutcome == outcome &&
+            _activitySummary == summary &&
+            _activityOperationId == operationId)
+        {
+            return;
+        }
+
+        _activityPhase = phase;
+        _activityOutcome = outcome;
+        _activitySummary = summary;
+        _activityOperationId = operationId;
+        StateChanged.raise(*this, nullptr);
+    }
+
     // Swap the bar between two modes:
     //   * chat / connecting / etc. (active=false) — agent logo + "<name> <version>"
     //   * session management view (active=true)  — no logo, "Agent sessions"

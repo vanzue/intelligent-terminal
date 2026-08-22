@@ -149,6 +149,7 @@
       <DependentUpon>CommandPalette.xaml</DependentUpon>
     </ClInclude>
     <ClInclude Include="FilteredCommand.h" />
+    <ClInclude Include="PaneActivity.h" />
     <ClInclude Include="Pane.h" />
     <ClInclude Include="../fzf/fzf.h" />
     <ClInclude Include="pch.h" />

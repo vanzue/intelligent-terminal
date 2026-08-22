@@ -20,5 +20,6 @@ namespace TerminalApp
 
         event TitleChangeRequestedArgs TitleChangeRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> RenameEnded;
+        event Windows.Foundation.TypedEventHandler<Object, Object> ActivityIndicatorInvoked;
     }
 }

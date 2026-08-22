@@ -54,6 +54,9 @@ impl App {
         if let Some(ref tab) = self.owner_tab_id {
             params["tab_id"] = serde_json::Value::String(tab.clone());
         }
+        if let Some(ref pane) = self.pane_id {
+            params["pane_id"] = serde_json::Value::String(pane.clone());
+        }
         let evt = serde_json::json!({
             "type": "event",
             "method": "agent_status",
@@ -123,7 +126,7 @@ impl App {
             );
             return;
         };
-        let evt = build_agent_state_changed_event(target_tab, tab);
+        let evt = build_agent_state_changed_event(target_tab, self.pane_id.as_deref(), tab);
         send_wt_protocol_event(evt.to_string());
 
         // Autofix bar is window-level (single bottom bar reflecting the
@@ -133,10 +136,38 @@ impl App {
             send_bar_event(&tab.autofix.bar_snapshot, Some(target_tab));
         }
     }
+
+    pub(super) fn project_changed_activity_states(&mut self) {
+        self.last_projected_activity
+            .retain(|tab_id, _| self.tab_sessions.contains_key(tab_id));
+        let changes: Vec<_> = self
+            .tab_sessions
+            .iter()
+            .filter_map(|(tab_id, tab)| {
+                let event =
+                    build_agent_state_changed_event(tab_id, self.pane_id.as_deref(), tab);
+                let projection = serde_json::json!({
+                    "pane_id": event["params"]["pane_id"],
+                    "activity": event["params"]["activity"],
+                });
+                if self.last_projected_activity.get(tab_id) == Some(&projection) {
+                    None
+                } else {
+                    Some((tab_id.clone(), event, projection))
+                }
+            })
+            .collect();
+
+        for (tab_id, event, projection) in changes {
+            self.last_projected_activity.insert(tab_id, projection);
+            send_wt_protocol_event(event.to_string());
+        }
+    }
 }
 
 pub(super) fn build_agent_state_changed_event(
     target_tab: &str,
+    pane_id: Option<&str>,
     tab: &TabSession,
 ) -> serde_json::Value {
     let view = match tab.current_view {
@@ -146,7 +177,21 @@ pub(super) fn build_agent_state_changed_event(
     let usage = tab.usage.as_ref().map(|snapshot| {
         crate::usage::UsageProjection::with_staleness(snapshot, tab.usage_staleness)
     });
-    serde_json::json!({
+    let waiting = !tab.permission.is_empty() || !tab.user_input.is_empty();
+    let phase = if waiting {
+        "waiting"
+    } else if tab.turn.is_in_flight() {
+        "working"
+    } else {
+        "idle"
+    };
+    let operation_id = tab
+        .turn
+        .prompt()
+        .map(|prompt| prompt.id)
+        .unwrap_or(tab.activity_operation_id);
+    let outcome = tab.activity_outcome.map(|outcome| outcome.as_str());
+    let mut event = serde_json::json!({
         "type": "event",
         "method": "agent_state_changed",
         "params": {
@@ -155,6 +200,71 @@ pub(super) fn build_agent_state_changed_event(
             "pane_open": tab.pane_open,
             "pane_position": tab.agent_pane_position,
             "usage": usage,
+            "activity": {
+                "phase": phase,
+                "outcome": outcome,
+                "operation_id": operation_id,
+                "summary": tab.activity_summary.as_deref(),
+            },
         }
-    })
+    });
+    if let Some(pane_id) = pane_id {
+        event["params"]["pane_id"] = serde_json::Value::String(pane_id.to_string());
+    }
+    event
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt(id: u64) -> SubmittedPrompt {
+        SubmittedPrompt {
+            id,
+            text: "test".into(),
+            submitted_at_unix_s: 0.0,
+            context: TurnContext::default(),
+            autofix: None,
+        }
+    }
+
+    #[test]
+    fn activity_projection_tracks_turn_waiting_and_outcome() {
+        let mut tab = TabSession {
+            turn: TurnState::Submitted(prompt(42)),
+            activity_operation_id: 42,
+            activity_summary: Some("Inspect the repository".into()),
+            ..Default::default()
+        };
+
+        let working = build_agent_state_changed_event("TAB-1", Some("PANE-1"), &tab);
+        assert_eq!(working["params"]["pane_id"], "PANE-1");
+        assert_eq!(working["params"]["activity"]["phase"], "working");
+        assert_eq!(working["params"]["activity"]["operation_id"], 42);
+        assert_eq!(
+            working["params"]["activity"]["summary"],
+            "Inspect the repository"
+        );
+
+        tab.user_input.push_back(UserInputState {
+            request_id: "request".into(),
+            request: crate::agent_tools::user_input::UserInputRequest {
+                question: "Choose".into(),
+                choices: vec![],
+                allow_freeform: true,
+            },
+            selected: 0,
+            input: String::new(),
+            responder: None,
+        });
+        let waiting = build_agent_state_changed_event("TAB-1", Some("PANE-1"), &tab);
+        assert_eq!(waiting["params"]["activity"]["phase"], "waiting");
+
+        tab.user_input.clear();
+        tab.turn = TurnState::Idle;
+        tab.activity_outcome = Some(AgentActivityOutcome::Succeeded);
+        let completed = build_agent_state_changed_event("TAB-1", Some("PANE-1"), &tab);
+        assert_eq!(completed["params"]["activity"]["phase"], "idle");
+        assert_eq!(completed["params"]["activity"]["outcome"], "succeeded");
+    }
 }

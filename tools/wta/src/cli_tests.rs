@@ -64,17 +64,20 @@ fn cli_initial_load_session_id_without_cwd_is_allowed() {
 }
 
 #[test]
-fn cli_parses_owner_tab_and_window_identity() {
+fn cli_parses_owner_tab_pane_and_window_identity() {
     let cli = Cli::try_parse_from([
         "wta",
         "--owner-tab-id",
         "{tab-guid}",
+        "--owner-pane-id",
+        "pane-guid",
         "--owner-window-id",
         "42",
     ])
     .expect("owner identity flags must parse");
 
     assert_eq!(cli.owner_tab_id.as_deref(), Some("{tab-guid}"));
+    assert_eq!(cli.owner_pane_id.as_deref(), Some("pane-guid"));
     assert_eq!(cli.owner_window_id.as_deref(), Some("42"));
 }
 

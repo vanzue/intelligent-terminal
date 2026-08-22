@@ -10834,7 +10834,8 @@ fn usage_projection_contains_context_cost_and_explicit_null() {
         }),
         ..Default::default()
     };
-    let event = super::app_status_projection::build_agent_state_changed_event("TAB-1", &tab);
+    let event =
+        super::app_status_projection::build_agent_state_changed_event("TAB-1", None, &tab);
     let items = event["params"]["usage"]["items"]
         .as_array()
         .expect("usage items");
@@ -10848,6 +10849,7 @@ fn usage_projection_contains_context_cost_and_explicit_null() {
 
     let cleared = super::app_status_projection::build_agent_state_changed_event(
         "TAB-1",
+        None,
         &TabSession::default(),
     );
     assert!(cleared["params"]["usage"].is_null());

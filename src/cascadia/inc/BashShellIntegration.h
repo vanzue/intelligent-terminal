@@ -34,11 +34,10 @@
 
 namespace Microsoft::Terminal::ShellIntegration::Bash
 {
-    // v3: gate emission on the Intelligent Terminal host marker and repair the
-    // OSC 133;A/B pair after the user's PROMPT_COMMAND rebuilds PS1. The
-    // version bump rewrites existing v2 profile blocks; WSL inherits this
-    // version via WslBashFlavor.
-    inline constexpr int kVersion = 3;
+    // v4: append OSC 133;C through Bash 4.4+'s PS0 pre-execution hook without
+    // replacing a user-defined PS0. The version bump upgrades existing
+    // profiles; WSL inherits this version via WslBashFlavor.
+    inline constexpr int kVersion = 4;
 
     inline std::wstring ScriptFileName()
     {
@@ -106,6 +105,14 @@ namespace Microsoft::Terminal::ShellIntegration::Bash
 case "${-:-}" in *i*) ;; *) return 0 2>/dev/null ;; esac
 [ -n "${__IT_SHELLINTEG_INSTALLED:-}" ] && return 0 2>/dev/null
 __IT_SHELLINTEG_INSTALLED=1
+
+# Bash 4.4+ expands PS0 after reading a complete command and immediately
+# before executing it. Append OSC 133;C without replacing a user-defined PS0.
+# Older Bash versions ignore PS0, so they retain the existing D/A/B behavior.
+case "${BASH_VERSINFO[0]:-0}.${BASH_VERSINFO[1]:-0}" in
+    0.*|1.*|2.*|3.*|4.[0-3]) ;;
+    *) PS0="${PS0:-}"$'\033]133;C\007' ;;
+esac
 
 # Snapshot the user's PROMPT_COMMAND once; we re-run it from our wrapper
 # so we don't clobber any existing hook (starship, oh-my-bash, etc).
