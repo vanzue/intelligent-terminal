@@ -10342,6 +10342,7 @@ namespace winrt::TerminalApp::implementation
         // In theory, it would be convenient to also change these for the
         // inactive tabs as well, but we're leaving that as a follow up.
         _SetNewTabButtonColor(bgColor, bgColor);
+        _UpdateActivityCenterButton();
 
         // Third: the window frame. This is basically the same logic as the tab row background.
         // We'll set our `FrameBrush` property, for the window to later use.
@@ -11437,20 +11438,14 @@ namespace winrt::TerminalApp::implementation
         _activityCenterIcon.Glyph(L"\xE8FD");
         _activityCenterIcon.Opacity(hasActivity ? 1.0 : 0.65);
 
-        const auto resources = WUX::Application::Current().Resources();
-        const auto brushKey = winrt::box_value(L"TextFillColorPrimaryBrush");
         if (hasAttention)
         {
             _activityCenterIcon.Foreground(WUX::Media::SolidColorBrush{
                 Windows::UI::ColorHelper::FromArgb(255, 0xFF, 0xD7, 0x00) });
         }
-        else if (resources.HasKey(brushKey))
+        else if (const auto foreground = _newTabButton.Foreground())
         {
-            const auto resource = ThemeLookup(resources, _tabRow.ActualTheme(), brushKey);
-            if (const auto brush = resource.try_as<WUX::Media::Brush>())
-            {
-                _activityCenterIcon.Foreground(brush);
-            }
+            _activityCenterIcon.Foreground(foreground);
         }
 
         const auto accessibleName = hasAttention ?
