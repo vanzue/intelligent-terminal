@@ -17,9 +17,13 @@ AI-native Windows Terminal — agents (Copilot, Claude, Gemini, custom) can unde
 | Trigger | Behavior |
 |---------|----------|
 | `>Toggle AI assistant` | Opens/toggles agent pane (`openAgentPane` action) |
-| `?<prompt>` | Delegates to hidden background WTA process |
+| `?<prompt>` | Launches a hidden one-shot `wta delegate` that opens a new tab running the agent with the prompt baked in |
 | `?` (empty) | No-op |
-| `&` | Background task mode (future, C9) |
+| `&` | Background task mode (future, C9 — `&` currently raises a no-op stub) |
+
+Keybindings (`defaults.json`): `Ctrl+Shift+.` toggles the agent pane
+(`Terminal.OpenAgentPane`); `Ctrl+Shift+/` opens the Agent Sessions view
+(`Terminal.OpenAgentSessions`), and does **not** toggle the pane.
 
 Agent pane: position configurable (`bottom`/`right`/`top`/`left`). Color-coded VT output.
 
@@ -34,7 +38,8 @@ Agent pane: position configurable (`bottom`/`right`/`top`/`left`). Color-coded V
     "delegateAgent": "copilot",      // Agent for ?<prompt> delegation
     "delegateModel": "",
     "delegateCustomCommand": "",
-    "autoFixEnabled": true,
+    "autoErrorDetectionEnabled": true,
+    "autoFixEnabled": false,         // Source default is false (opt-in)
     "aiIntegration.coordinator.enabled": false,
     "aiIntegration.coordinator.commandline": "wta",
     "aiIntegration.coordinator.profile": "{fd19208a-412b-4857-8a2d-9ca592b4b16e}",
@@ -43,6 +48,14 @@ Agent pane: position configurable (`bottom`/`right`/`top`/`left`). Color-coded V
     "aiIntegration.confirmation.inputOperations": "auto",
 }
 ```
+
+`agentPaneBackend` is a separate **profile-level** setting
+(`MTSMSettings.h`), not a global. Agent settings are policy-aware: the
+`EffectiveAcpAgent` / `EffectiveDelegateAgent` / `EffectiveAutoFixEnabled` /
+`EffectiveAutoErrorDetectionEnabled` getters apply any group-policy override,
+with `IsAgentPolicyLocked` / `IsCustomAgentPolicyLocked` / `IsAutoFixPolicyLocked`
+/ `IsAgentSessionHooksPolicyLocked` reporting whether the user may change them
+(`GlobalAppSettings.idl`).
 
 ## Architecture
 
@@ -84,8 +97,8 @@ the handshake. The pre-warm is skipped when wta is unavailable, GPO
 blocks all agents, or the tab arrived with an agent pane via cross-window
 drag-in (`agentLeavesSeen > 0`). See `TabManagement.cpp:366`.
 
-**Agent pane toggle = stash, not destroy.** `Ctrl+Shift+.` /
-`Ctrl+Shift+/` / the bottom-bar button toggle via
+**Agent pane toggle = stash, not destroy.** `Ctrl+Shift+.` and the
+bottom-bar button toggle via
 `Tab::StashAgentPane`/`RestoreStashedAgentPane` (built on WT's
 `Pane::HidePane`/`RestorePane`). Helper + conpty + ACP session + chat
 history all survive the toggle. The pane is only destroyed on tab close
@@ -103,7 +116,8 @@ or `Ctrl+C×2` in the TUI. See spec §8.
 | COM Server | `src/cascadia/WindowsTerminal/TerminalProtocolComServer.cpp` |
 | Shared master spawn | `src/cascadia/TerminalApp/SharedWta.cpp` |
 | wta-master | `tools/wta/src/master/mod.rs` |
-| wta-helper / App | `tools/wta/src/app.rs`, `tools/wta/src/main.rs` |
+| wta-helper (TUI) | `tools/wta/src/app.rs`, `tools/wta/src/helper/mod.rs` |
+| Autofix | `tools/wta/src/app/autofix.rs` |
 | Settings | `src/cascadia/TerminalSettingsModel/GlobalAppSettings.idl`, `MTSMSettings.h` |
 | Settings UI | `src/cascadia/TerminalSettingsEditor/AIAgents.xaml` |
 | Process coord | `src/cascadia/WindowsTerminal/WindowEmperor.cpp` |
@@ -121,21 +135,27 @@ Architecture) makes autofix work on a stashed pane. But a failure that
 lands before the helper's session connects (cold start of master/agent
 CLI, in-flight `session/new`, or a `Failed` agent) is **dropped**:
 `trigger_autofix_inner` early-returns when `state != Connected`
-(`app.rs:6820`). The bottom-bar notification banner still shows; only the
+(`app/autofix.rs:97`). The bottom-bar notification banner still shows; only the
 autofix pill / LLM call is skipped, and the failure is not re-triggered
 once the session later connects.
 
-**Key code**: `tools/wta/src/app.rs` (`classify_wt_event`, `maybe_trigger_autofix`), `TerminalPage.cpp:2650-2740` (event handlers), `TerminalProtocolComServer.cpp` (`_ensurePageEventsRegistered`).
+**Key code**: `tools/wta/src/app.rs` (`classify_wt_event`),
+`tools/wta/src/app/autofix.rs` (`maybe_trigger_autofix`, `trigger_autofix_inner`),
+`TerminalPage.cpp` (`OnAutofixStateChanged`, + the OSC-133 → `ProtocolVtSequenceReceived`
+fan-out), `TerminalProtocolComServer.cpp` (`_ensurePageEventsRegistered`).
 
-**Diag log**: `wta-ensure-host.log` in the WTA log directory — shows event flow, classification, and autofix triggers.
+**Diag log**: `terminal-agent-pane.log` (C++, `AgentPaneLog.h`) carries the
+WT-side event registration and `SharedWta` lifecycle; the Rust-side
+classification and autofix decisions land in `wta-main_helper-{pid}.log`
+under the `target=autofix` events, in the WTA log directory.
 
 ## Hooks plugin auto-upgrade
 
 When IT is installed or upgraded, the bundled `wt-agent-hooks` plugin
-(`tools/wta/wt-agent-hooks/{copilot,claude,gemini-extension}/`) needs to
-re-land into any agent CLI the user already opted into (via Settings UI /
-FRE "Install hooks" or `wta hooks install`). This is handled silently by
-`agent_hooks_installer::upgrade_installed_hooks`, fired once per
+(`tools/wta/wt-agent-hooks/{copilot,claude,gemini-extension,codex,opencode}/`)
+needs to re-land into any agent CLI the user already opted into (via
+Settings UI / FRE "Install hooks" or `wta hooks install`). This is handled
+silently by `agent_hooks_installer::upgrade_installed_hooks`, fired once per
 `wta-master` startup on a blocking-pool thread.
 
 **Trigger model — bundle version is the upgrade signal.** A tiny state
@@ -238,8 +258,9 @@ back to the flat bare `…\logs\`.
 > and simply ignored.
 
 **Log level** is controlled by the `WTA_LOG` (or `RUST_LOG`) env var. When
-unset, the default comes from the build: **debug builds default to `debug`,
-release builds default to `info`** (`logging::default_filter_directive`). Set
+unset, the default comes from the build: **debug builds default to `debug`
+(with the noisy `agent_client_protocol` crate capped at `info`), release
+builds default to `info`** (`logging::default_filter_directive`). Set
 `WTA_LOG=debug|trace` for the noisy traces, or `WTA_LOG=warn` to quiet a
 release build further.
 
@@ -264,6 +285,7 @@ current version's dir, per-PID helper logs older than **3 days** are pruned and
 ### Log files in the helper+master architecture
 
 ```
+wta-main.log               — bare `wta` with no mode/subcommand (exits with an error)
 wta-main_master.log        — wta-master process: agent CLI spawn, named pipe accept
                               loop, per-helper routing, session_to_helper map updates,
                               agent CLI exit detection, connection failures
@@ -271,15 +293,21 @@ wta-main_helper-{pid}.log  — each wta-helper process (one file per PID, so con
                               per-tab helpers don't interleave): pipe connect, ACP
                               initialize, session/new, prompts, agent responses,
                               TUI lifecycle, connection failures
-wta-cli.log                — short-lived wtcli-style commands (list-*, capture-pane,
+wta-cli.log                — short-lived CLI helpers (list-*, capture-pane,
                               listen, sessions, …); daily-rotated, 3-day retention
 wta-delegate.log           — `?<prompt>` delegation flow (separate from agent pane)
-wta-probe.log              — `probe-models` ACP model-list probe
+wta-probe.log              — `probe-models` / `probe-*` ACP model-list probes
 wta-install-hooks.log      — `hooks install` agent-hook bridge installation
-wta-ensure-host.log        — WT-side background ensure-running diagnostics (kept from
-                              M3-M6 era; remains useful for SharedWta lifecycle)
-wta-acp-debug.log          — low-level ACP JSON-RPC wire trace
+wta-panic.log              — synchronous panic backstop (written outside the appender)
 ```
+
+Each of these is named from the `process_label` chosen in `main.rs`
+(`wta-{process}.log`), so the set above is exactly the set of labels.
+
+> `wta-ensure-host.log` and `wta-acp-debug.log` appear in older docs and
+> trace-target comments but have **no writer** in the current tree — nothing
+> produces them. The WT-side `SharedWta` lifecycle is logged to
+> `terminal-agent-pane.log` instead.
 
 Two files in the per-version dir are **not** written by the Rust wta binary —
 `hook-trace.log` (PowerShell hooks) and `terminal-agent-pane.log` (C++ side);
@@ -301,7 +329,10 @@ scenarios:
 | Helper pipe lifecycle | `target=master helper_id=…` shows connect+exit |
 | Agent CLI failures | `target=agent_stderr` |
 | Connection failures (either side) | `"exiting with error"` — `target=master` in `wta-main_master.log`, `target=helper` in `wta-main_helper-{pid}.log`; plus inline `step="acp_initialize"` / `step="pipe_connect"` for the helper handshake |
-| Internal control routing | `target=internal_control` (legacy; mostly empty post-Z) |
+
+> The older `target=internal_control` target no longer exists — the
+> `protocol/internal_control.rs` module was removed with the helper+master
+> move, so `internal_control` has no producer in the current tree.
 
 ### Example: end-to-end trace of one user prompt
 
@@ -403,8 +434,8 @@ package identity to activate it via `CoCreateInstance`. This is why:
   `0x80073D54` (APPMODEL_ERROR_NO_PACKAGE) when calling COM methods
 
 If autofix or the agent pane stops working after a debug launch, check
-`%TEMP%\wta-ensure-host.log` for the `0x80073D54` error — it means
-the wrong (unpackaged) `wta.exe` was used.
+`terminal-agent-pane.log` in the versioned WTA log directory for the
+`0x80073D54` error — it means the wrong (unpackaged) `wta.exe` was used.
 
 ## Installer
 
